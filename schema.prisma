@@ -1,0 +1,234 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// 6.1 Ingestion / Audit
+model FetchJob {
+  taskId     String   @id @default(uuid()) @map("task_id")
+  provider   String
+  endpoint   String
+  params     Json
+  status     String   @default("PENDING") // PENDING/RUNNING/SUCCESS/FAILED
+  attempts   Int      @default(0)
+  lastError  String?  @map("last_error") @db.Text
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+  startedAt  DateTime? @map("started_at")
+  finishedAt DateTime? @map("finished_at")
+
+  // Relation
+  rawArchive SourceRawArchive?
+
+  @@map("fetch_jobs")
+}
+
+// 6.2 Raw Archives (Insert-only)
+model SourceRawArchive {
+  id         String   @id @default(uuid())
+  taskId     String   @unique @map("task_id")
+  provider   String
+  rawPayload Json?    @map("raw_payload")
+  rawHtml    String?  @map("raw_html") @db.Text
+  rawBinary  Bytes?   @map("raw_binary")
+  etag       String?
+  receivedAt DateTime @default(now()) @map("received_at")
+
+  // Relations
+  fetchJob          FetchJob                   @relation(fields: [taskId], references: [taskId])
+  integrityLog      DataIntegrityLog?
+  metaIndex         SourceRawMetaIndex?
+  dlqRecord         DlqRecord?
+  storagePointer    RawArchiveStoragePointer?
+  refinedAccounts   FinancialAccount[]
+
+  @@map("source_raw_archives")
+}
+
+// 6.3 Integrity
+model DataIntegrityLog {
+  id              String   @id @default(uuid())
+  rawArchiveId    String   @unique @map("raw_archive_id")
+  sha256          String   @db.Char(64)
+  hashAlgo        String   @default("SHA-256") @map("hash_algo")
+  computedAt      DateTime @default(now()) @map("computed_at")
+  verifierVersion String   @map("verifier_version")
+
+  // Relation
+  rawArchive SourceRawArchive @relation(fields: [rawArchiveId], references: [id])
+
+  @@map("data_integrity_logs")
+}
+
+// 6.4 Meta Index
+model SourceRawMetaIndex {
+  id            String   @id @default(uuid())
+  rawArchiveId  String   @unique @map("raw_archive_id")
+  ticker        String
+  corpName      String   @map("corp_name")
+  reportCode    String   @map("report_code")
+  fiscalYear    Int      @map("fiscal_year")
+  fiscalQuarter Int?     @map("fiscal_quarter")
+  closingMonth  Int?     @map("closing_month")
+  documentType  String   @map("document_type")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  // Relation
+  rawArchive SourceRawArchive @relation(fields: [rawArchiveId], references: [id])
+
+  @@index([ticker, fiscalYear, reportCode])
+  @@map("source_raw_meta_index")
+}
+
+// 6.5 DLQ / Failures
+model DlqRecord {
+  id           String    @id @default(uuid())
+  taskId       String    @map("task_id")
+  rawArchiveId String?   @unique @map("raw_archive_id")
+  errorType    String    @map("error_type")
+  errorMessage String    @map("error_message") @db.Text
+  stackTrace   String?   @map("stack_trace") @db.Text
+  retryCount   Int       @default(0) @map("retry_count")
+  nextRetryAt  DateTime? @map("next_retry_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  // Relation
+  rawArchive SourceRawArchive? @relation(fields: [rawArchiveId], references: [id])
+
+  @@map("dlq_records")
+}
+
+// 6.6 Refined (Normalized Financial Accounts)
+model FinancialAccount {
+  id                  String   @id @default(uuid())
+  ticker              String
+  fiscalYear          Int      @map("fiscal_year")
+  fiscalQuarter       Int?     @map("fiscal_quarter")
+  statementType       String   @map("statement_type") // IS/BS/CF
+  standardAccountCode String   @map("standard_account_code")
+  standardAccountName String   @map("standard_account_name")
+  reportedAccountName String   @map("reported_account_name")
+  value               Decimal  @db.Decimal(30, 10)
+  unit                String
+  sourceRawArchiveId  String   @map("source_raw_archive_id")
+  createdAt           DateTime @default(now()) @map("created_at")
+
+  // Relations
+  sourceRawArchive SourceRawArchive @relation(fields: [sourceRawArchiveId], references: [id])
+  standardAccount  StandardTaxonomy @relation(fields: [standardAccountCode], references: [accountCode])
+
+  @@map("financial_accounts")
+}
+
+// 6.7 Taxonomy & Mapping
+model StandardTaxonomy {
+  accountCode String  @id @map("account_code")
+  accountName String  @map("account_name")
+  statementType String @map("statement_type") // IS/BS/CF
+  parentCode  String? @map("parent_code")
+  isRequired  Boolean @default(false) @map("is_required")
+  description String? @db.Text
+
+  // Relations
+  parent            StandardTaxonomy?    @relation("TaxonomyHierarchy", fields: [parentCode], references: [accountCode], onDelete: NoAction, onUpdate: NoAction)
+  children          StandardTaxonomy[]   @relation("TaxonomyHierarchy")
+  mappingRules      AccountMappingRule[]
+  financialAccounts FinancialAccount[]
+
+  @@map("standard_taxonomy")
+}
+
+model AccountMappingRule {
+  id                         String   @id @default(uuid())
+  provider                   String
+  reportedAccountNamePattern String   @map("reported_account_name_pattern")
+  tickerScope                String?  @map("ticker_scope")
+  standardAccountCode        String   @map("standard_account_code")
+  priority                   Int
+  createdAt                  DateTime @default(now()) @map("created_at")
+
+  // Relation
+  standardAccount StandardTaxonomy @relation(fields: [standardAccountCode], references: [accountCode])
+
+  @@map("account_mapping_rules")
+}
+
+// 6.8 Model Layer (User/Scenario)
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  // Relation
+  models Model[]
+
+  @@map("users")
+}
+
+model Model {
+  id             String   @id @default(uuid())
+  userId         String   @map("user_id")
+  ticker         String
+  name           String
+  baseFiscalYear Int      @map("base_fiscal_year")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  // Relations
+  user      User       @relation(fields: [userId], references: [id])
+  scenarios Scenario[]
+
+  @@map("models")
+}
+
+model Scenario {
+  id          String   @id @default(uuid())
+  modelId     String   @map("model_id")
+  name        String // Base/Bull/Bear/custom
+  assumptions Json
+  version     Int
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  model        Model         @relation(fields: [modelId], references: [id])
+  modelOutputs ModelOutput[]
+
+  @@map("scenarios")
+}
+
+model ModelOutput {
+  id            String   @id @default(uuid())
+  scenarioId    String   @map("scenario_id")
+  outputType    String   @map("output_type") // DCF/WACC/3ST_forecast/etc
+  outputPayload Json     @map("output_payload")
+  computedAt    DateTime @default(now()) @map("computed_at")
+  engineVersion String   @map("engine_version")
+
+  // Relation
+  scenario Scenario @relation(fields: [scenarioId], references: [id])
+
+  @@map("model_outputs")
+}
+
+// 7. Lifecycle Management
+model RawArchiveStoragePointer {
+  id                     String   @id @default(uuid())
+  rawArchiveId           String   @unique @map("raw_archive_id")
+  storageTier            String   @map("storage_tier") // HOT/WARM/COLD
+  objectKey              String   @map("object_key")
+  movedAt                DateTime @map("moved_at")
+  retentionPolicyVersion String   @map("retention_policy_version")
+
+  // Relation
+  rawArchive SourceRawArchive @relation(fields: [rawArchiveId], references: [id])
+
+  @@map("raw_archive_storage_pointers")
+}

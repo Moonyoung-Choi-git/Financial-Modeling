@@ -1,17 +1,37 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+This is the **Financial Modeling Web Platform (FMWP)** project.
+
+> "데이터의 무결성 위에 예술적인 인터랙션을 얹다."
+
+## Project Goal
+To provide a production-grade financial modeling platform that is **Auditable**, **Reproducible**, and **Immutable**.
+
+## Tech Stack
+- **Frontend**: Next.js 15 (App Router), Tailwind CSS, shadcn/ui
+- **Backend**: Next.js API Routes, Node.js 22 LTS
+- **Database**: PostgreSQL 16
+- **Queue/Cache**: Redis, BullMQ
+- **Infrastructure**: Docker, AWS ECS
 
 ## Getting Started
 
-First, run the development server:
+### 1. Environment Setup
+Copy the example environment file:
+
+```bash
+cp .env.example .env
+```
+
+### 2. Start Infrastructure
+Run PostgreSQL and Redis using Docker Compose:
+
+```bash
+docker-compose up -d
+```
+
+### 3. Run Development Server
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
