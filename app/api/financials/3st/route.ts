@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { Prisma } from '@prisma/client';
 import prisma from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
@@ -59,7 +60,22 @@ export async function GET(request: Request) {
       CF: accounts.filter((a) => a.statementType === 'CF'),
     });
   } catch (error: any) {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === 'P2021'
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            'Database schema not initialized. Run: npm run db:push (or npm run db:migrate) and restart the app.',
+        },
+        { status: 503 }
+      );
+    }
     console.error('[financials/3st] Failed to load data:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json(
+      { error: error?.message || 'Internal Server Error' },
+      { status: 500 }
+    );
   }
 }

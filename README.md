@@ -21,14 +21,27 @@ Copy the example environment file:
 cp .env.example .env
 ```
 
-### 2. Start Infrastructure
+### 2. Install Dependencies
+
+```bash
+npm install
+```
+
+### 3. Start Infrastructure
 Run PostgreSQL and Redis using Docker Compose:
 
 ```bash
 docker-compose up -d
 ```
 
-### 3. Run Development Server
+### 4. Initialize Database Schema
+
+```bash
+npm run db:push
+npm run db:seed
+```
+
+### 5. Run Development Server
 
 ```bash
 npm run dev

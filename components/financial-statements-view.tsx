@@ -36,16 +36,24 @@ export default function FinancialStatementsView({ ticker }: { ticker: string }) 
           `/api/financials/3st?ticker=${encodeURIComponent(ticker)}&year=${year}`
         );
         if (!res.ok) {
-          const text = await res.text();
-          const message = text
-            ? `${res.status} ${res.statusText}: ${text}`
-            : `${res.status} ${res.statusText}`;
+          let message = `${res.status} ${res.statusText}`;
+          const contentType = res.headers.get("content-type") || "";
+          if (contentType.includes("application/json")) {
+            const body = await res.json();
+            if (body?.error) message = body.error;
+          } else {
+            const text = await res.text();
+            if (text) message = text;
+          }
           throw new Error(message);
         }
         const json: FinancialData = await res.json();
         setData(json);
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Unknown error";
+        const rawMessage = error instanceof Error ? error.message : "Unknown error";
+        const message = rawMessage
+          .replace(/\s+/g, " ")
+          .slice(0, 220);
         console.error("Error fetching financial data:", error);
         setError(message);
         setData(null);
@@ -116,6 +124,13 @@ export default function FinancialStatementsView({ ticker }: { ticker: string }) 
           <div className="flex flex-col items-center justify-center h-[400px] text-muted-foreground text-center px-6">
             <p className="font-medium">Failed to load financial data.</p>
             <p className="text-sm mt-1 break-all">{error}</p>
+            {error.includes("Database schema not initialized") && (
+              <p className="text-xs mt-2 text-muted-foreground">
+                Run <span className="font-mono">npm run db:push</span> (or{" "}
+                <span className="font-mono">npm run db:migrate</span>) and restart
+                the app.
+              </p>
+            )}
           </div>
         ) : !data || data[activeTab].length === 0 ? (
           <div className="flex flex-col items-center justify-center h-[400px] text-muted-foreground">
