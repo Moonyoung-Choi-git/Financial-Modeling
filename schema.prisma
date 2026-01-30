@@ -1,5 +1,6 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
+// FMWP (Financial Modeling Web Platform) - Schema Design
+// Based on Specification v1.0 (2026-01-30)
+// Section 3: DB Schema/Data Layer Requirements (Raw → Curated → Model)
 
 generator client {
   provider = "prisma-client-js"
@@ -10,246 +11,476 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// 6.1 Ingestion / Audit
-model FetchJob {
-  taskId     String   @id @default(uuid()) @map("task_id")
-  provider   String
-  endpoint   String
-  params     Json
-  status     String   @default("PENDING") // PENDING/RUNNING/SUCCESS/FAILED
-  attempts   Int      @default(0)
-  lastError  String?  @map("last_error") @db.Text
-  createdAt  DateTime @default(now()) @map("created_at")
-  updatedAt  DateTime @updatedAt @map("updated_at")
-  startedAt  DateTime? @map("started_at")
-  finishedAt DateTime? @map("finished_at")
+// ============================================================================
+// Section 3.2: RAW DART Layer (원천 데이터 저장)
+// Namespace: raw_dart (테이블명 prefix로 구현)
+// ============================================================================
 
-  // Relation
-  rawArchive SourceRawArchive?
-
-  @@map("fetch_jobs")
-}
-
-// 6.2 Raw Archives (Insert-only)
-model SourceRawArchive {
-  id         String   @id @default(uuid())
-  taskId     String   @unique @map("task_id")
-  provider   String
-  rawPayload Json?    @map("raw_payload")
-  rawHtml    String?  @map("raw_html") @db.Text
-  rawBinary  Bytes?   @map("raw_binary")
-  etag       String?
-  receivedAt DateTime @default(now()) @map("received_at")
+// (1) raw_dart.api_call - API 호출 이력 및 메타데이터
+model RawDartApiCall {
+  id                String    @id @default(uuid())
+  endpoint          String    // e.g., /api/fnlttSinglAcntAll.json
+  paramsCanonical   String    @map("params_canonical") @db.Text // 정렬된 key=value
+  requestedAt       DateTime  @map("requested_at")
+  completedAt       DateTime? @map("completed_at")
+  latencyMs         Int?      @map("latency_ms")
+  httpStatus        Int?      @map("http_status")
+  dartStatus        String?   @map("dart_status") // 000, 010, 013, 020 등
+  dartMessage       String?   @map("dart_message")
+  responseFormat    String?   @map("response_format") // json/xml/zip
+  payloadHash       String?   @map("payload_hash") // SHA-256
+  payloadSize       Int?      @map("payload_size")
+  retryCount        Int       @default(0) @map("retry_count")
+  jobId             String?   @map("job_id") // BullMQ job ID
+  workerId          String?   @map("worker_id")
 
   // Relations
-  fetchJob          FetchJob                   @relation(fields: [taskId], references: [taskId])
-  integrityLog      DataIntegrityLog?
-  metaIndex         SourceRawMetaIndex?
-  dlqRecord         DlqRecord?
-  storagePointer    RawArchiveStoragePointer?
-  refinedAccounts   FinancialAccount[]
+  payloadJson   RawDartPayloadJson?
+  payloadBinary RawDartPayloadBinary?
 
-  @@map("source_raw_archives")
+  @@unique([endpoint, paramsCanonical, payloadHash])
+  @@index([dartStatus])
+  @@index([completedAt])
+  @@map("raw_dart_api_calls")
 }
 
-// 6.3 Integrity
-model DataIntegrityLog {
+// (2) raw_dart.payload_json - JSON 응답 저장
+model RawDartPayloadJson {
+  id          String   @id @default(uuid())
+  apiCallId   String   @unique @map("api_call_id")
+  bodyJson    Json     @map("body_json")
+  parsedOk    Boolean  @default(true) @map("parsed_ok")
+  parseError  String?  @map("parse_error") @db.Text
+
+  // Relation
+  apiCall RawDartApiCall @relation(fields: [apiCallId], references: [id], onDelete: Cascade)
+
+  @@map("raw_dart_payload_json")
+}
+
+// (3) raw_dart.payload_binary - Binary/Zip 저장 (S3 참조)
+model RawDartPayloadBinary {
+  id                   String   @id @default(uuid())
+  apiCallId            String   @unique @map("api_call_id")
+  blobPath             String?  @map("blob_path") // S3 key or local path
+  sha256               String   @db.Char(64)
+  contentType          String   @map("content_type") // application/zip
+  extractedManifestJson Json?   @map("extracted_manifest_json") // zip 내부 파일 목록
+
+  // Relation
+  apiCall RawDartApiCall @relation(fields: [apiCallId], references: [id], onDelete: Cascade)
+
+  @@map("raw_dart_payload_binary")
+}
+
+// (4) raw_dart.corp_master - 기업 마스터 (corpCode.xml)
+model RawDartCorpMaster {
+  corpCode    String   @id @map("corp_code") @db.Char(8)
+  stockCode   String?  @map("stock_code") @db.Char(6) // 비상장은 null
+  corpName    String   @map("corp_name")
+  corpEngName String?  @map("corp_eng_name")
+  modifyDate  String   @map("modify_date") // YYYYMMDD
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at")
+
+  // Relations
+  filings      RawDartFiling[]
+  fnlttAllRows RawDartFnlttAllRow[]
+  fnlttKeyRows RawDartFnlttKeyRow[]
+
+  @@index([stockCode])
+  @@index([corpName])
+  @@map("raw_dart_corp_master")
+}
+
+// (5) raw_dart.filing - 공시 목록 (list API)
+model RawDartFiling {
+  rceptNo        String   @id @map("rcept_no")
+  corpCode       String   @map("corp_code")
+  stockCode      String?  @map("stock_code")
+  rceptDt        String   @map("rcept_dt") // YYYYMMDD
+  reportNm       String   @map("report_nm")
+  flrNm          String   @map("flr_nm") // 공시제출인명
+  rm             String?  @map("rm") @db.Text // 비고
+  pblntfTy       String   @map("pblntf_ty") // A001, A002 등
+  pblntfDetailTy String?  @map("pblntf_detail_ty")
+  isFinal        Boolean  @default(true) @map("is_final") // last_reprt_at 기반
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  // Relations
+  corpMaster   RawDartCorpMaster      @relation(fields: [corpCode], references: [corpCode])
+  fnlttAllRows RawDartFnlttAllRow[]
+  fnlttKeyRows RawDartFnlttKeyRow[]
+
+  @@index([corpCode])
+  @@index([stockCode])
+  @@index([rceptDt])
+  @@index([isFinal])
+  @@map("raw_dart_filings")
+}
+
+// (6) raw_dart.fnltt_all_row - fnlttSinglAcntAll 행 단위 저장 (핵심!)
+model RawDartFnlttAllRow {
   id              String   @id @default(uuid())
-  rawArchiveId    String   @unique @map("raw_archive_id")
-  sha256          String   @db.Char(64)
-  hashAlgo        String   @default("SHA-256") @map("hash_algo")
-  computedAt      DateTime @default(now()) @map("computed_at")
-  verifierVersion String   @map("verifier_version")
+  corpCode        String   @map("corp_code")
+  bsnsYear        String   @map("bsns_year") // YYYY
+  reprtCode       String   @map("reprt_code") // 11011, 11012, 11013, 11014
+  fsDiv           String   @map("fs_div") // CFS, OFS
+  rceptNo         String?  @map("rcept_no")
 
-  // Relation
-  rawArchive SourceRawArchive @relation(fields: [rawArchiveId], references: [id])
+  // Statement info
+  sjDiv           String   @map("sj_div") // BS, IS, CIS, CF, SCE
+  sjNm            String?  @map("sj_nm")
 
-  @@map("data_integrity_logs")
+  // Account info
+  accountId       String?  @map("account_id")
+  accountNm       String   @map("account_nm")
+  accountDetail   String?  @map("account_detail") @db.Text
+
+  // Amounts (당기/전기/전전기)
+  thstrmNm        String?  @map("thstrm_nm")
+  thstrmAmount    String?  @map("thstrm_amount") // 문자열 (콤마 포함)
+  thstrmAddAmount String?  @map("thstrm_add_amount") // 누적 (분기)
+
+  frmtrmNm        String?  @map("frmtrm_nm")
+  frmtrmAmount    String?  @map("frmtrm_amount")
+  frmtrmAddAmount String?  @map("frmtrm_add_amount")
+
+  frmtrmQNm       String?  @map("frmtrm_q_nm")
+  frmtrmQAmount   String?  @map("frmtrm_q_amount")
+
+  bfefrmtrmNm     String?  @map("bfefrmtrm_nm")
+  bfefrmtrmAmount String?  @map("bfefrmtrm_amount")
+
+  // Meta
+  ord             String?  @map("ord") // 정렬순서
+  currency        String?  @map("currency")
+
+  rawSourceApiCallId String? @map("raw_source_api_call_id")
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  // Relations
+  corpMaster RawDartCorpMaster @relation(fields: [corpCode], references: [corpCode])
+  filing     RawDartFiling?    @relation(fields: [rceptNo], references: [rceptNo])
+
+  @@unique([corpCode, bsnsYear, reprtCode, fsDiv, sjDiv, accountId, accountNm, accountDetail, ord])
+  @@index([corpCode, bsnsYear, reprtCode, fsDiv, sjDiv])
+  @@index([accountNm])
+  @@map("raw_dart_fnltt_all_rows")
 }
 
-// 6.4 Meta Index
-model SourceRawMetaIndex {
-  id            String   @id @default(uuid())
-  rawArchiveId  String   @unique @map("raw_archive_id")
-  ticker        String
-  corpName      String   @map("corp_name")
-  reportCode    String   @map("report_code")
-  fiscalYear    Int      @map("fiscal_year")
-  fiscalQuarter Int?     @map("fiscal_quarter")
-  closingMonth  Int?     @map("closing_month")
-  documentType  String   @map("document_type")
-  createdAt     DateTime @default(now()) @map("created_at")
+// (7) raw_dart.fnltt_key_row - fnlttSinglAcnt 주요계정 저장
+model RawDartFnlttKeyRow {
+  id              String   @id @default(uuid())
+  corpCode        String   @map("corp_code")
+  bsnsYear        String   @map("bsns_year")
+  reprtCode       String   @map("reprt_code")
+  rceptNo         String?  @map("rcept_no")
 
-  // Relation
-  rawArchive SourceRawArchive @relation(fields: [rawArchiveId], references: [id])
+  sjDiv           String   @map("sj_div") // BS, IS
+  accountNm       String   @map("account_nm")
 
-  @@index([ticker, fiscalYear, reportCode])
-  @@map("source_raw_meta_index")
+  thstrmNm        String?  @map("thstrm_nm")
+  thstrmAmount    String?  @map("thstrm_amount")
+
+  frmtrmNm        String?  @map("frmtrm_nm")
+  frmtrmAmount    String?  @map("frmtrm_amount")
+
+  bfefrmtrmNm     String?  @map("bfefrmtrm_nm")
+  bfefrmtrmAmount String?  @map("bfefrmtrm_amount")
+
+  ord             String?  @map("ord")
+
+  rawSourceApiCallId String? @map("raw_source_api_call_id")
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  // Relations
+  corpMaster RawDartCorpMaster @relation(fields: [corpCode], references: [corpCode])
+  filing     RawDartFiling?    @relation(fields: [rceptNo], references: [rceptNo])
+
+  @@unique([corpCode, bsnsYear, reprtCode, sjDiv, accountNm, ord])
+  @@map("raw_dart_fnltt_key_rows")
 }
 
-// 6.5 DLQ / Failures
-model DlqRecord {
-  id           String    @id @default(uuid())
-  taskId       String    @map("task_id")
-  rawArchiveId String?   @unique @map("raw_archive_id")
-  errorType    String    @map("error_type")
-  errorMessage String    @map("error_message") @db.Text
-  stackTrace   String?   @map("stack_trace") @db.Text
-  retryCount   Int       @default(0) @map("retry_count")
-  nextRetryAt  DateTime? @map("next_retry_at")
-  createdAt    DateTime  @default(now()) @map("created_at")
+// ============================================================================
+// Section 3.3: CURATED Finance Layer (표준화/정규화)
+// Namespace: curated_fin
+// ============================================================================
 
-  // Relation
-  rawArchive SourceRawArchive? @relation(fields: [rawArchiveId], references: [id])
+// curated_fin.standard_coa - 표준 계정과목표 (Standard Chart of Accounts)
+model CuratedFinStandardCoa {
+  standardLineId      String  @id @map("standard_line_id") // IS.REVENUE, BS.CASH, etc
+  statementType       String  @map("statement_type") // IS, BS, CF, CIS, SCE
+  displayNameEn       String  @map("display_name_en")
+  displayNameKr       String  @map("display_name_kr")
+  signConvention      String  @default("+") @map("sign_convention") // +/-
+  rollupParentId      String? @map("rollup_parent_id")
+  isRequiredForModel  Boolean @default(false) @map("is_required_for_model")
+  defaultCalcMethod   String? @map("default_calc_method") // DIRECT/DERIVED/PLUG
+  notes               String? @db.Text
 
-  @@map("dlq_records")
+  // Relations
+  parent           CuratedFinStandardCoa?     @relation("CoaHierarchy", fields: [rollupParentId], references: [standardLineId], onDelete: NoAction, onUpdate: NoAction)
+  children         CuratedFinStandardCoa[]    @relation("CoaHierarchy")
+  accountMappings  CuratedFinAccountMapping[]
+  facts            CuratedFinFact[]
+
+  @@map("curated_fin_standard_coa")
 }
 
-// 6.6 Refined (Normalized Financial Accounts)
-model FinancialAccount {
+// curated_fin.account_mapping - 계정 매핑 룰
+model CuratedFinAccountMapping {
+  id                 String   @id @default(uuid())
+  accountSourceId    String?  @map("account_source_id") // DART account_id
+  accountNameKr      String?  @map("account_name_kr") // regex pattern
+  accountDetailPath  String?  @map("account_detail_path")
+  statementType      String?  @map("statement_type")
+  standardLineId     String   @map("standard_line_id")
+  confidenceScore    Float    @default(1.0) @map("confidence_score")
+  priority           Int      @default(10)
+  mappingVersion     Int      @default(1) @map("mapping_version")
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  // Relation
+  standardCoa CuratedFinStandardCoa @relation(fields: [standardLineId], references: [standardLineId])
+
+  @@index([accountNameKr])
+  @@index([standardLineId])
+  @@map("curated_fin_account_mapping")
+}
+
+// curated_fin.fact - 정규화된 재무 Fact 테이블 (핵심!)
+model CuratedFinFact {
+  id                 String    @id @default(uuid())
+  entityId           String    @map("entity_id") // 내부 기업 키
+  corpCode           String    @map("corp_code")
+  stockCode          String?   @map("stock_code")
+
+  // Period info
+  periodType         String    @map("period_type") // ANNUAL, QUARTER, YTD
+  fiscalYear         Int       @map("fiscal_year")
+  fiscalQuarter      Int?      @map("fiscal_quarter") // 1~4 or null
+  reportCode         String    @map("report_code") // 11011, 11012, 11013, 11014
+  fsScope            String    @map("fs_scope") // CONSOLIDATED(CFS), SEPARATE(OFS)
+
+  // Statement & Account
+  statementType      String    @map("statement_type") // BS, IS, CIS, CF, SCE
+  accountSourceId    String?   @map("account_source_id")
+  accountNameKr      String    @map("account_name_kr")
+  accountDetailPath  String?   @map("account_detail_path") @db.Text
+  standardLineId     String?   @map("standard_line_id")
+
+  // Amount
+  amount             Decimal   @db.Decimal(30, 2)
+  currency           String    @default("KRW")
+
+  // Dates
+  asOfDate           DateTime? @map("as_of_date") // BS 시점
+  flowStartDate      DateTime? @map("flow_start_date") // IS/CF 시작일
+  flowEndDate        DateTime? @map("flow_end_date") // IS/CF 종료일
+
+  // Source tracking
+  ordering           Int?      @map("ordering")
+  sourceRceptNo      String?   @map("source_rcept_no")
+  sourcePriority     Int       @default(10) @map("source_priority") // ALL=10, KEY=20
+
+  createdAt          DateTime  @default(now()) @map("created_at")
+
+  // Relations
+  standardCoa CuratedFinStandardCoa? @relation(fields: [standardLineId], references: [standardLineId])
+  entity      ModelEntity?           @relation(fields: [entityId], references: [id])
+
+  @@index([corpCode, fiscalYear, fsScope, statementType])
+  @@index([entityId, fiscalYear, standardLineId])
+  @@index([stockCode])
+  @@map("curated_fin_facts")
+}
+
+// curated_fin.restatement_tracker - 정정공시 추적
+model CuratedFinRestatementTracker {
+  id                String   @id @default(uuid())
+  corpCode          String   @map("corp_code")
+  fiscalYear        Int      @map("fiscal_year")
+  reportCode        String   @map("report_code")
+  fsScope           String   @map("fs_scope")
+  latestRceptNo     String   @map("latest_rcept_no")
+  previousRceptNo   String?  @map("previous_rcept_no")
+  detectedAt        DateTime @default(now()) @map("detected_at")
+  changeSummaryJson Json?    @map("change_summary_json")
+
+  @@unique([corpCode, fiscalYear, reportCode, fsScope])
+  @@map("curated_fin_restatement_tracker")
+}
+
+// ============================================================================
+// Section 3.4: MODEL Layer (3-Statement 모델링)
+// Namespace: model
+// ============================================================================
+
+// model.project - 프로젝트 (여러 기업/시나리오 그룹)
+model ModelProject {
+  id           String   @id @default(uuid())
+  name         String
+  baseCurrency String   @default("KRW") @map("base_currency")
+  createdBy    String?  @map("created_by")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  // Relations
+  entities ModelEntity[]
+
+  @@map("model_projects")
+}
+
+// model.entity - 기업 엔티티
+model ModelEntity {
   id                  String   @id @default(uuid())
-  ticker              String
-  fiscalYear          Int      @map("fiscal_year")
-  fiscalQuarter       Int?     @map("fiscal_quarter")
-
-  // [추가] 명세서 요구사항 반영: 연결(CFS)/개별(OFS) 및 보고서 출처 구분
-  fsDiv               String   @default("CFS") @map("fs_div") // CFS or OFS
-  reportCode          String?  @map("report_code") // 11011(사업), 11013(1분기) 등 우선순위 판단용
-
-  statementType       String   @map("statement_type") // IS/BS/CF/CIS
-  standardAccountCode String   @map("standard_account_code")
-  standardAccountName String   @map("standard_account_name")
-  reportedAccountName String   @map("reported_account_name")
-  value               Decimal  @db.Decimal(30, 10)
-  unit                String
-  sourceRawArchiveId  String   @map("source_raw_archive_id")
+  projectId           String?  @map("project_id")
+  corpCode            String   @map("corp_code")
+  stockCode           String?  @map("stock_code")
+  displayName         String   @map("display_name")
+  industryTemplateId  String?  @map("industry_template_id")
+  fiscalYearEndMonth  Int?     @map("fiscal_year_end_month") // 12월 결산 = 12
+  defaultFsScope      String   @default("CONSOLIDATED") @map("default_fs_scope") // CFS/OFS
   createdAt           DateTime @default(now()) @map("created_at")
 
   // Relations
-  sourceRawArchive SourceRawArchive @relation(fields: [sourceRawArchiveId], references: [id])
-  standardAccount  StandardTaxonomy @relation(fields: [standardAccountCode], references: [accountCode])
+  project        ModelProject?         @relation(fields: [projectId], references: [id])
+  assumptionSets ModelAssumptionSet[]
+  snapshots      ModelSnapshot[]
+  facts          CuratedFinFact[]
 
-  @@map("financial_accounts")
-  @@index([ticker, fiscalYear, fsDiv, statementType])
+  @@index([corpCode])
+  @@index([stockCode])
+  @@map("model_entities")
 }
 
-// 6.7 Taxonomy & Mapping
-model StandardTaxonomy {
-  accountCode String  @id @map("account_code")
-  accountName String  @map("account_name")
-  statementType String @map("statement_type") // IS/BS/CF
-  parentCode  String? @map("parent_code")
-  isRequired  Boolean @default(false) @map("is_required")
-  description String? @db.Text
+// model.assumption_set - 시나리오별 가정 (Inputs)
+model ModelAssumptionSet {
+  id               String   @id @default(uuid())
+  entityId         String   @map("entity_id")
+  scenarioName     String   @map("scenario_name") // Base, Bull, Bear, Management
+  assumptionVersion Int     @default(1) @map("assumption_version")
+  inputsJson       Json     @map("inputs_json") // 성장률, 마진, DSO 등
+  lockFlag         Boolean  @default(false) @map("lock_flag")
+  createdAt        DateTime @default(now()) @map("created_at")
+  createdBy        String?  @map("created_by")
 
   // Relations
-  parent            StandardTaxonomy?    @relation("TaxonomyHierarchy", fields: [parentCode], references: [accountCode], onDelete: NoAction, onUpdate: NoAction)
-  children          StandardTaxonomy[]   @relation("TaxonomyHierarchy")
-  mappingRules      AccountMappingRule[]
-  financialAccounts FinancialAccount[]
+  entity    ModelEntity     @relation(fields: [entityId], references: [id])
+  snapshots ModelSnapshot[]
 
-  @@map("standard_taxonomy")
+  @@index([entityId, scenarioName])
+  @@map("model_assumption_sets")
 }
 
-model AccountMappingRule {
-  id                         String   @id @default(uuid())
-  provider                   String
-  reportedAccountNamePattern String   @map("reported_account_name_pattern")
-  tickerScope                String?  @map("ticker_scope")
-  standardAccountCode        String   @map("standard_account_code")
-  priority                   Int
-  createdAt                  DateTime @default(now()) @map("created_at")
+// model.snapshot - 불변 스냅샷 (Immutable)
+model ModelSnapshot {
+  id                      String    @id @default(uuid())
+  entityId                String    @map("entity_id")
+  assumptionSetId         String?   @map("assumption_set_id")
+  sourceDataCutoff        DateTime? @map("source_data_cutoff")
+  usedRceptNoList         String[]  @map("used_rcept_no_list")
+  usedCuratedVersionHash  String?   @map("used_curated_version_hash")
+  usedMappingVersion      Int?      @map("used_mapping_version")
+  calcEngineVersion       String?   @map("calc_engine_version")
+  snapshotHash            String    @map("snapshot_hash") // 입력+원천+매핑+엔진 버전 해시
+  createdAt               DateTime  @default(now()) @map("created_at")
+
+  // Relations
+  entity         ModelEntity                   @relation(fields: [entityId], references: [id])
+  assumptionSet  ModelAssumptionSet?           @relation(fields: [assumptionSetId], references: [id])
+  outputLines    ModelOutputLine[]
+  supportSchedules ModelSupportScheduleOutput[]
+  viewerSheets   ModelViewerSheet[]
+
+  @@index([entityId])
+  @@index([snapshotHash])
+  @@map("model_snapshots")
+}
+
+// model.output_line - 3-Statement 출력 (행별)
+model ModelOutputLine {
+  id              String   @id @default(uuid())
+  snapshotId      String   @map("snapshot_id")
+  statementType   String   @map("statement_type") // IS, BS, CF
+  standardLineId  String   @map("standard_line_id")
+  periodIndex     Int      @map("period_index") // 0..N (과거/예측)
+  fiscalYear      Int      @map("fiscal_year")
+  fiscalQuarter   Int?     @map("fiscal_quarter")
+  periodType      String   @map("period_type") // ANNUAL, QUARTER
+  value           Decimal  @db.Decimal(30, 2)
+  unitScale       String   @default("KRW") @map("unit_scale")
+  displayOrder    Int      @map("display_order")
+  isHistorical    Boolean  @map("is_historical")
+  provenance      String   @map("provenance") // SOURCE, DERIVED, PLUG
 
   // Relation
-  standardAccount StandardTaxonomy @relation(fields: [standardAccountCode], references: [accountCode])
+  snapshot ModelSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
 
-  @@map("account_mapping_rules")
+  @@index([snapshotId, statementType, periodIndex])
+  @@map("model_output_lines")
 }
 
-// 6.8 Model Layer (User/Scenario)
+// model.support_schedule_output - Supporting Schedules (WC, PP&E, Debt 등)
+model ModelSupportScheduleOutput {
+  id           String   @id @default(uuid())
+  snapshotId   String   @map("snapshot_id")
+  scheduleType String   @map("schedule_type") // WorkingCapital, PPE, Debt, Equity, Taxes
+  rowKey       String   @map("row_key")
+  colPeriod    Int      @map("col_period") // period index
+  value        Decimal  @db.Decimal(30, 2)
+  metaJson     Json?    @map("meta_json")
+
+  // Relation
+  snapshot ModelSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+
+  @@index([snapshotId, scheduleType])
+  @@map("model_support_schedule_outputs")
+}
+
+// model.viewer_sheet - 엑셀급 렌더링 캐시 (Section 7.3)
+model ModelViewerSheet {
+  id              String   @id @default(uuid())
+  snapshotId      String   @map("snapshot_id")
+  sheetName       String   @map("sheet_name") // IS, BS, CF, Summary, Checks
+  gridJson        Json     @map("grid_json") // { rows, cols, cells: [...] }
+  chartJson       Json?    @map("chart_json")
+  lastGeneratedAt DateTime @default(now()) @map("last_generated_at")
+  cacheHash       String?  @map("cache_hash")
+
+  // Relation
+  snapshot ModelSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+
+  @@unique([snapshotId, sheetName])
+  @@map("model_viewer_sheets")
+}
+
+// ============================================================================
+// Section 11: Security / Audit (감사 로그)
+// ============================================================================
+
+// User management (최소 구현)
 model User {
   id           String   @id @default(uuid())
   email        String   @unique
   passwordHash String   @map("password_hash")
   createdAt    DateTime @default(now()) @map("created_at")
 
-  // Relation
-  models Model[]
-
   @@map("users")
 }
 
-model Model {
-  id             String   @id @default(uuid())
-  userId         String   @map("user_id")
-  ticker         String
-  name           String
-  baseFiscalYear Int      @map("base_fiscal_year")
-  createdAt      DateTime @default(now()) @map("created_at")
+// Audit log (사용자 액션 추적)
+model AuditLog {
+  id         String   @id @default(uuid())
+  userId     String?  @map("user_id")
+  action     String   // CREATE_SNAPSHOT, EXPORT_XLSX, VIEW_MODEL
+  entityType String   @map("entity_type") // SNAPSHOT, ENTITY, etc
+  entityId   String?  @map("entity_id")
+  metaJson   Json?    @map("meta_json")
+  ipAddress  String?  @map("ip_address")
+  createdAt  DateTime @default(now()) @map("created_at")
 
-  // Relations
-  user      User       @relation(fields: [userId], references: [id])
-  scenarios Scenario[]
-
-  @@map("models")
-}
-
-model Scenario {
-  id          String   @id @default(uuid())
-  modelId     String   @map("model_id")
-  name        String // Base/Bull/Bear/custom
-  assumptions Json
-  version     Int
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
-
-  // Relations
-  model        Model         @relation(fields: [modelId], references: [id])
-  modelOutputs ModelOutput[]
-
-  @@map("scenarios")
-}
-
-model ModelOutput {
-  id            String   @id @default(uuid())
-  scenarioId    String   @map("scenario_id")
-  outputType    String   @map("output_type") // DCF/WACC/3ST_forecast/etc
-  outputPayload Json     @map("output_payload")
-  computedAt    DateTime @default(now()) @map("computed_at")
-  engineVersion String   @map("engine_version")
-
-  // Relation
-  scenario Scenario @relation(fields: [scenarioId], references: [id])
-
-  @@map("model_outputs")
-
-  // [추가] 모델 생성 시 사용된 옵션 기록 (명세서 7.2.C)
-  metaData      Json?    @map("meta_data")
-}
-
-// 7. Lifecycle Management
-model RawArchiveStoragePointer {
-  id                     String   @id @default(uuid())
-  rawArchiveId           String   @unique @map("raw_archive_id")
-  storageTier            String   @map("storage_tier") // HOT/WARM/COLD
-  objectKey              String   @map("object_key")
-  movedAt                DateTime @map("moved_at")
-  retentionPolicyVersion String   @map("retention_policy_version")
-
-  // Relation
-  rawArchive SourceRawArchive @relation(fields: [rawArchiveId], references: [id])
-
-  @@map("raw_archive_storage_pointers")
-}
-
-// 8. Master Data (Corp Code)
-model CorpCode {
-  code        String   @id @map("corp_code") // DART 고유번호 (8자리)
-  name        String   @map("corp_name")
-  stockCode   String?  @map("stock_code")    // 상장 종목코드 (6자리), 비상장은 null 또는 공백
-  modifyDate  String   @map("modify_date")   // YYYYMMDD
-  updatedAt   DateTime @default(now()) @map("updated_at")
-
-  @@index([stockCode])
-  @@map("corp_codes")
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
 }
