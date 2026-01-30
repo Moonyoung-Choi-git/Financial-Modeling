@@ -16,6 +16,46 @@ import { parseStringPromise } from 'xml2js';
 /**
  * corpCode.xml 다운로드 및 동기화
  */
+let syncInFlight: Promise<{
+  total: number;
+  updated: number;
+  added: number;
+  errors: number;
+}> | null = null;
+let lastSyncAt: number | null = null;
+
+export async function syncCorpCodesOnce(options?: {
+  force?: boolean;
+  minIntervalMs?: number;
+}): Promise<{
+  total: number;
+  updated: number;
+  added: number;
+  errors: number;
+}> {
+  const minIntervalMs = options?.minIntervalMs ?? 6 * 60 * 60 * 1000;
+  const now = Date.now();
+
+  if (!options?.force && lastSyncAt && now - lastSyncAt < minIntervalMs) {
+    return { total: 0, updated: 0, added: 0, errors: 0 };
+  }
+
+  if (syncInFlight) {
+    return syncInFlight;
+  }
+
+  syncInFlight = syncCorpCodes()
+    .then((stats) => {
+      lastSyncAt = Date.now();
+      return stats;
+    })
+    .finally(() => {
+      syncInFlight = null;
+    });
+
+  return syncInFlight;
+}
+
 export async function syncCorpCodes(): Promise<{
   total: number;
   updated: number;

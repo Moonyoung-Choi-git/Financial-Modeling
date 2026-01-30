@@ -103,8 +103,16 @@ export class DartClient {
    * API Call Ledger 기록 (명세서 Section 2.5)
    */
   private async recordApiCall(metadata: ApiCallMetadata, payload?: any): Promise<string> {
-    const apiCall = await prisma.rawDartApiCall.create({
-      data: {
+    const payloadHash = metadata.payloadHash || 'missing';
+    const apiCall = await prisma.rawDartApiCall.upsert({
+      where: {
+        endpoint_paramsCanonical_payloadHash: {
+          endpoint: metadata.endpoint,
+          paramsCanonical: metadata.paramsCanonical,
+          payloadHash,
+        },
+      },
+      create: {
         endpoint: metadata.endpoint,
         paramsCanonical: metadata.paramsCanonical,
         requestedAt: metadata.requestedAt,
@@ -114,7 +122,20 @@ export class DartClient {
         dartStatus: metadata.dartStatus,
         dartMessage: metadata.dartMessage,
         responseFormat: metadata.responseFormat,
-        payloadHash: metadata.payloadHash,
+        payloadHash,
+        payloadSize: metadata.payloadSize,
+        retryCount: metadata.retryCount,
+        jobId: metadata.jobId,
+        workerId: metadata.workerId,
+      },
+      update: {
+        requestedAt: metadata.requestedAt,
+        completedAt: metadata.completedAt,
+        latencyMs: metadata.latencyMs,
+        httpStatus: metadata.httpStatus,
+        dartStatus: metadata.dartStatus,
+        dartMessage: metadata.dartMessage,
+        responseFormat: metadata.responseFormat,
         payloadSize: metadata.payloadSize,
         retryCount: metadata.retryCount,
         jobId: metadata.jobId,
@@ -124,11 +145,17 @@ export class DartClient {
 
     // JSON payload 저장
     if (payload && metadata.responseFormat === 'json') {
-      await prisma.rawDartPayloadJson.create({
-        data: {
+      await prisma.rawDartPayloadJson.upsert({
+        where: { apiCallId: apiCall.id },
+        create: {
           apiCallId: apiCall.id,
           bodyJson: payload,
           parsedOk: true,
+        },
+        update: {
+          bodyJson: payload,
+          parsedOk: true,
+          parseError: null,
         },
       });
     }

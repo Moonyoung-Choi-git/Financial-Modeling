@@ -3,12 +3,12 @@ import { ArrowLeft } from 'lucide-react';
 import prisma from '@/lib/db';
 import { buildThreeStatementModel } from '@/lib/modeling/builder';
 import FinancialStatementsView from '@/components/financial-statements-view';
-import { fetchFinancialAll, syncCorpCodes } from '@/lib/dart';
+import { fetchFinancialAll, syncCorpCodesOnce } from '@/lib/dart';
 import { transformRawToCurated } from '@/lib/curate';
 
 interface PageProps {
   params: Promise<{ ticker: string }>;
-  searchParams?: { market?: string; refresh?: string };
+  searchParams?: Promise<{ market?: string; refresh?: string }>;
 }
 
 export const dynamic = 'force-dynamic';
@@ -20,6 +20,12 @@ const MARKET_CLASS_MAP: Record<string, string> = {
   KOSDAQ: 'K',
   KONEX: 'N',
   OTHER: 'E',
+};
+const MARKET_LABEL_MAP: Record<string, string> = {
+  Y: 'KOSPI',
+  K: 'KOSDAQ',
+  N: 'KONEX',
+  E: 'OTHER',
 };
 
 const normalizeKey = (value: string) =>
@@ -33,12 +39,14 @@ type CorpResolution =
       corpCode: string;
       stockCode: string | null;
       corpName: string;
+      corpEngName: string | null;
       corpCls: string | null;
     }
   | {
       error: string;
       candidates?: Array<{
         corpName: string;
+        corpEngName: string | null;
         stockCode: string | null;
         corpCode: string;
         corpCls: string | null;
@@ -59,6 +67,7 @@ async function resolveCorpIdentity(input: string, market?: string): Promise<Corp
         corpCode: corp.corpCode,
         stockCode: corp.stockCode,
         corpName: corp.corpName,
+        corpEngName: corp.corpEngName,
         corpCls: corp.corpCls,
       };
     }
@@ -73,6 +82,7 @@ async function resolveCorpIdentity(input: string, market?: string): Promise<Corp
         corpCode: corp.corpCode,
         stockCode: corp.stockCode,
         corpName: corp.corpName,
+        corpEngName: corp.corpEngName,
         corpCls: corp.corpCls,
       };
     }
@@ -93,6 +103,7 @@ async function resolveCorpIdentity(input: string, market?: string): Promise<Corp
         corpCode: corp.corpCode,
         stockCode: corp.stockCode,
         corpName: corp.corpName,
+        corpEngName: corp.corpEngName,
         corpCls: corp.corpCls,
       };
     }
@@ -102,6 +113,7 @@ async function resolveCorpIdentity(input: string, market?: string): Promise<Corp
         error: 'Multiple companies matched the name. Please use stock code or corp code.',
         candidates: matches.map((corp) => ({
           corpName: corp.corpName,
+          corpEngName: corp.corpEngName,
           stockCode: corp.stockCode,
           corpCode: corp.corpCode,
           corpCls: corp.corpCls,
@@ -195,8 +207,10 @@ async function triggerAutoIngestion(params: {
 
 export default async function FinancialsPage({ params, searchParams }: PageProps) {
   const { ticker: rawTicker } = await params;
-  const market = searchParams?.market;
-  const forceRefresh = searchParams?.refresh === '1' || searchParams?.refresh === 'true';
+  const resolvedSearchParams = searchParams ? await searchParams : undefined;
+  const market = resolvedSearchParams?.market;
+  const forceRefresh =
+    resolvedSearchParams?.refresh === '1' || resolvedSearchParams?.refresh === 'true';
   let ticker = rawTicker;
   try {
     ticker = decodeURIComponent(rawTicker);
@@ -222,10 +236,16 @@ export default async function FinancialsPage({ params, searchParams }: PageProps
   let error: string | null = null;
 
   let resolution = await resolveCorpIdentity(ticker, market);
+  if ('error' in resolution && market) {
+    resolution = await resolveCorpIdentity(ticker);
+  }
   if ('error' in resolution) {
     try {
-      await syncCorpCodes();
-      resolution = await resolveCorpIdentity(ticker, market);
+      const corpCount = await prisma.rawDartCorpMaster.count();
+      if (corpCount === 0 || forceRefresh) {
+        await syncCorpCodesOnce({ force: true });
+        resolution = await resolveCorpIdentity(ticker, market);
+      }
     } catch (syncError: any) {
       error = syncError?.message || 'Failed to sync corp codes from DART.';
     }
@@ -366,6 +386,12 @@ export default async function FinancialsPage({ params, searchParams }: PageProps
     .sort((a, b) => a - b);
   const displayAnchor = availableYears.length > 0 ? Math.max(...availableYears) : anchorYear;
   const yearsToDisplay = Array.from({ length: 5 }, (_, i) => displayAnchor - 4 + i);
+  const exchangeLabel = corpInfo?.corpCls
+    ? MARKET_LABEL_MAP[corpInfo.corpCls] || 'OTHER'
+    : market?.toUpperCase();
+  const displayName = corpInfo?.corpName
+    ? `${corpInfo.corpName}${corpInfo.corpEngName ? `/${corpInfo.corpEngName}` : ''}`
+    : identifier;
 
   return (
     <div className="container mx-auto py-8 px-4">
@@ -379,11 +405,11 @@ export default async function FinancialsPage({ params, searchParams }: PageProps
           </Link>
           <div>
             <h1 className="text-3xl font-bold">
-              Financial Statements: {corpInfo?.corpName || identifier}
+              Financial Statements: {displayName}
             </h1>
             <p className="text-gray-500">
               {corpInfo?.corpName
-                ? `${identifier} • Historical 3-Statement Model (Source: DART Open API)`
+                ? `${identifier}${exchangeLabel ? ` • ${exchangeLabel}` : ''} • Historical 3-Statement Model (Source: DART Open API)`
                 : 'Historical 3-Statement Model (Source: DART Open API)'}
             </p>
           </div>

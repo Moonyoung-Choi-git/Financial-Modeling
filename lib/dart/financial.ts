@@ -17,6 +17,49 @@ import {
   DartNoDataError,
 } from './types';
 import prisma from '../db';
+import { syncFilings } from './filings';
+import type { Prisma } from '@prisma/client';
+
+async function resolveSafeRceptNo(params: {
+  corpCode: string;
+  bsnsYear: string;
+  rceptNo?: string | null;
+}): Promise<string | null> {
+  const { corpCode, bsnsYear, rceptNo } = params;
+
+  if (!rceptNo) return null;
+
+  const existing = await prisma.rawDartFiling.findUnique({
+    where: { rceptNo },
+    select: { rceptNo: true },
+  });
+
+  if (existing) return rceptNo;
+
+  if (process.env.DART_SYNC_FILINGS_ON_MISS !== 'false') {
+    try {
+      await syncFilings({
+        corpCode,
+        startDate: `${bsnsYear}0101`,
+        endDate: `${bsnsYear}1231`,
+        lastReportOnly: false,
+      });
+    } catch (error: any) {
+      console.warn(
+        `[DART Filings] Failed to sync filings for ${corpCode} ${bsnsYear}: ${error?.message || error}`
+      );
+    }
+
+    const afterSync = await prisma.rawDartFiling.findUnique({
+      where: { rceptNo },
+      select: { rceptNo: true },
+    });
+
+    if (afterSync) return rceptNo;
+  }
+
+  return null;
+}
 
 // ============================================================================
 // fnlttSinglAcnt (주요계정) - 명세서 Section 2.4.2
@@ -45,10 +88,30 @@ export async function fetchFinancialKey(params: DartFnlttKeyParams): Promise<{
     let hasBs = false;
     let hasIs = false;
 
+    const rawRceptNo = response.list.find(item => item.rcept_no)?.rcept_no || null;
+    const safeRceptNo = await resolveSafeRceptNo({
+      corpCode: params.corp_code,
+      bsnsYear: params.bsns_year,
+      rceptNo: rawRceptNo,
+    });
+
     // Store in raw_dart_fnltt_key_rows
     for (const item of response.list) {
       if (item.sj_div === 'BS') hasBs = true;
       if (item.sj_div === 'IS') hasIs = true;
+
+      const updateData: Prisma.RawDartFnlttKeyRowUpdateInput = {
+        thstrmNm: item.thstrm_nm,
+        thstrmAmount: item.thstrm_amount,
+        frmtrmNm: item.frmtrm_nm,
+        frmtrmAmount: item.frmtrm_amount,
+        bfefrmtrmNm: item.bfefrmtrm_nm,
+        bfefrmtrmAmount: item.bfefrmtrm_amount,
+      };
+
+      if (safeRceptNo) {
+        updateData.rceptNo = safeRceptNo;
+      }
 
       await prisma.rawDartFnlttKeyRow.upsert({
         where: {
@@ -61,19 +124,12 @@ export async function fetchFinancialKey(params: DartFnlttKeyParams): Promise<{
             ord: item.ord || '0',
           },
         },
-        update: {
-          thstrmNm: item.thstrm_nm,
-          thstrmAmount: item.thstrm_amount,
-          frmtrmNm: item.frmtrm_nm,
-          frmtrmAmount: item.frmtrm_amount,
-          bfefrmtrmNm: item.bfefrmtrm_nm,
-          bfefrmtrmAmount: item.bfefrmtrm_amount,
-        },
+        update: updateData,
         create: {
           corpCode: params.corp_code,
           bsnsYear: params.bsns_year,
           reprtCode: params.reprt_code,
-          rceptNo: item.rcept_no || null,
+          rceptNo: safeRceptNo,
           sjDiv: item.sj_div,
           accountNm: item.account_nm,
           thstrmNm: item.thstrm_nm,
@@ -135,18 +191,38 @@ export async function fetchFinancialAll(params: DartFnlttAllParams): Promise<{
     }
 
     const statementCounts: Record<string, number> = {};
-    let rceptNo: string | undefined;
+    const rawRceptNo = response.list.find(item => item.rcept_no)?.rcept_no || null;
+    const safeRceptNo = await resolveSafeRceptNo({
+      corpCode: params.corp_code,
+      bsnsYear: params.bsns_year,
+      rceptNo: rawRceptNo,
+    });
 
     // Store in raw_dart_fnltt_all_rows (핵심 원천 테이블!)
     for (const item of response.list) {
-      if (!rceptNo && item.rcept_no) {
-        rceptNo = item.rcept_no;
-      }
-
       const sjDiv = item.sj_div || 'UNKNOWN';
       statementCounts[sjDiv] = (statementCounts[sjDiv] || 0) + 1;
 
       try {
+        const updateData: Prisma.RawDartFnlttAllRowUpdateInput = {
+          sjNm: item.sj_nm,
+          thstrmNm: item.thstrm_nm,
+          thstrmAmount: item.thstrm_amount,
+          thstrmAddAmount: item.thstrm_add_amount,
+          frmtrmNm: item.frmtrm_nm,
+          frmtrmAmount: item.frmtrm_amount,
+          frmtrmAddAmount: item.frmtrm_add_amount,
+          frmtrmQNm: item.frmtrm_q_nm,
+          frmtrmQAmount: item.frmtrm_q_amount,
+          bfefrmtrmNm: item.bfefrmtrm_nm,
+          bfefrmtrmAmount: item.bfefrmtrm_amount,
+          currency: item.currency,
+        };
+
+        if (safeRceptNo) {
+          updateData.rceptNo = safeRceptNo;
+        }
+
         await prisma.rawDartFnlttAllRow.upsert({
           where: {
             corpCode_bsnsYear_reprtCode_fsDiv_sjDiv_accountId_accountNm_accountDetail_ord: {
@@ -161,26 +237,13 @@ export async function fetchFinancialAll(params: DartFnlttAllParams): Promise<{
               ord: item.ord || '0',
             },
           },
-          update: {
-            sjNm: item.sj_nm,
-            thstrmNm: item.thstrm_nm,
-            thstrmAmount: item.thstrm_amount,
-            thstrmAddAmount: item.thstrm_add_amount,
-            frmtrmNm: item.frmtrm_nm,
-            frmtrmAmount: item.frmtrm_amount,
-            frmtrmAddAmount: item.frmtrm_add_amount,
-            frmtrmQNm: item.frmtrm_q_nm,
-            frmtrmQAmount: item.frmtrm_q_amount,
-            bfefrmtrmNm: item.bfefrmtrm_nm,
-            bfefrmtrmAmount: item.bfefrmtrm_amount,
-            currency: item.currency,
-          },
+          update: updateData,
           create: {
             corpCode: params.corp_code,
             bsnsYear: params.bsns_year,
             reprtCode: params.reprt_code,
             fsDiv: params.fs_div,
-            rceptNo: item.rcept_no || null,
+            rceptNo: safeRceptNo,
             sjDiv,
             sjNm: item.sj_nm,
             accountId: item.account_id,
@@ -210,7 +273,7 @@ export async function fetchFinancialAll(params: DartFnlttAllParams): Promise<{
     return {
       rowCount: response.list.length,
       statementCounts,
-      rceptNo,
+      rceptNo: safeRceptNo || undefined,
     };
 
   } catch (error: any) {
