@@ -1,867 +1,340 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
-import { cn } from '@/lib/utils';
+import StatementTable, { ComputeCtx, RowDef, StatementYearData } from '@/components/statement-table';
 
-type StatementItem = {
-  name?: string;
-  value?: number;
-  unit?: string;
-};
+const REVENUE_CODES = ['IS.REVENUE', '매출액', '수익(매출액)', '영업수익'];
+const COGS_CODES = ['IS.COGS', '매출원가'];
+const GROSS_PROFIT_CODES = ['IS.GROSS_PROFIT', '매출총이익', '매출총이익(손실)'];
+const SGA_CODES = ['IS.SGA', '판매비와관리비', '판매비와일반관리비'];
+const DA_CODES = ['IS.DA', '감가상각비', '감가상각비및무형자산상각비'];
+const EBITDA_CODES = ['IS.EBITDA', 'EBITDA'];
+const EBIT_CODES = ['IS.EBIT', '영업이익', '영업이익(손실)'];
+const INTEREST_INCOME_CODES = ['IS.INTEREST_INCOME', '이자수익', '금융수익'];
+const INTEREST_EXPENSE_CODES = ['IS.INTEREST_EXPENSE', '이자비용', '금융비용'];
+const OTHER_INCOME_CODES = ['영업외수익', '기타수익'];
+const OTHER_EXPENSE_CODES = ['영업외비용', '기타비용'];
+const EBT_CODES = ['IS.EBT', '법인세비용차감전순이익', '법인세비용차감전계속영업이익'];
+const TAX_CODES = ['IS.TAXES', '법인세비용'];
+const NET_INCOME_CODES = ['IS.NET_INCOME', '당기순이익', '당기순이익(손실)'];
 
-type StatementData = Record<string, StatementItem>;
+const revenueValue = (year: number, ctx: ComputeCtx) => ctx.valueOf(REVENUE_CODES, year);
+const cogsValue = (year: number, ctx: ComputeCtx) => ctx.valueOf(COGS_CODES, year);
+const sgaValue = (year: number, ctx: ComputeCtx) => ctx.valueOf(SGA_CODES, year);
+const daValue = (year: number, ctx: ComputeCtx) => ctx.valueOf(DA_CODES, year);
+const interestIncomeValue = (year: number, ctx: ComputeCtx) =>
+  ctx.valueOf(INTEREST_INCOME_CODES, year);
+const interestExpenseValue = (year: number, ctx: ComputeCtx) =>
+  ctx.valueOf(INTEREST_EXPENSE_CODES, year);
 
-interface IncomeStatementTableProps {
-  data: Record<number, { IS?: StatementData }>;
-  years: number[];
-}
-
-type RowDef = {
-  id: string;
-  label: string;
-  code?: string;
-  format?: 'number' | 'percent';
-  kind?: 'section' | 'value' | 'ratio' | 'total';
-  compute?: (year: number, ctx: ComputeCtx) => number | null;
-  children?: RowDef[];
-};
-
-type DisplayRow = RowDef & { level: number };
-
-type ComputeCtx = {
-  years: number[];
-  valueOf: (code: string, year: number) => number | null;
-  prevYear: (year: number) => number | null;
-};
-
-const numberFormatter = new Intl.NumberFormat('en-US', {
-  minimumFractionDigits: 1,
-  maximumFractionDigits: 1,
-});
-
-const percentFormatter = new Intl.NumberFormat('en-US', {
-  minimumFractionDigits: 1,
-  maximumFractionDigits: 1,
-});
-
-const DEFAULT_COL_WIDTH = 72;
-const MIN_COL_WIDTH = 48;
-const MAX_COL_WIDTH = 180;
-
-const calcGrossSales = (ctx: ComputeCtx, year: number) => {
-  const gross = ctx.valueOf('IS_GROSS_SALES', year);
-  if (gross != null) return gross;
-  const net = ctx.valueOf('IS_1000', year);
-  const discounts = ctx.valueOf('IS_DISCOUNTS_REBATES', year);
-  if (net != null && discounts != null) return net + Math.abs(discounts);
-  return null;
-};
-
-const calcNetSales = (ctx: ComputeCtx, year: number) => ctx.valueOf('IS_1000', year);
-
-const calcSgaTotal = (ctx: ComputeCtx, year: number) => {
-  const selling = ctx.valueOf('IS_SELLING_EXPENSES', year);
-  const ga = ctx.valueOf('IS_GA_EXPENSES', year);
-  if (selling != null || ga != null) {
-    return (selling ?? 0) + (ga ?? 0);
-  }
-  const combined = ctx.valueOf('IS_1300', year);
-  return combined ?? null;
-};
-
-const calcGrossProfit = (ctx: ComputeCtx, year: number) => {
-  const gp = ctx.valueOf('IS_1200', year);
+const grossProfitValue = (year: number, ctx: ComputeCtx) => {
+  const gp = ctx.valueOf(GROSS_PROFIT_CODES, year);
   if (gp != null) return gp;
-  const net = calcNetSales(ctx, year);
-  const cogs = ctx.valueOf('IS_1100', year);
-  if (net == null || cogs == null) return null;
-  return net - cogs;
+  const rev = revenueValue(year, ctx);
+  const cogs = cogsValue(year, ctx);
+  if (rev == null || cogs == null) return null;
+  return rev - cogs;
 };
 
-const calcOperatingIncome = (ctx: ComputeCtx, year: number) => {
-  const op = ctx.valueOf('IS_2000', year);
-  if (op != null) return op;
-  const gp = calcGrossProfit(ctx, year);
-  const sga = calcSgaTotal(ctx, year);
+const operatingIncomeValue = (year: number, ctx: ComputeCtx) => {
+  const ebit = ctx.valueOf(EBIT_CODES, year);
+  if (ebit != null) return ebit;
+  const gp = grossProfitValue(year, ctx);
+  const sga = sgaValue(year, ctx);
   if (gp == null || sga == null) return null;
   return gp - sga;
 };
 
-const calcEbitda = (ctx: ComputeCtx, year: number) => {
-  const ebitda = ctx.valueOf('IS_EBITDA', year);
+const ebitdaValue = (year: number, ctx: ComputeCtx) => {
+  const ebitda = ctx.valueOf(EBITDA_CODES, year);
   if (ebitda != null) return ebitda;
-  const op = calcOperatingIncome(ctx, year);
-  const da = ctx.valueOf('IS_DA', year);
-  if (op == null || da == null) return null;
-  return op + Math.abs(da);
+  const ebit = operatingIncomeValue(year, ctx);
+  const da = daValue(year, ctx);
+  if (ebit == null || da == null) return null;
+  return ebit + Math.abs(da);
 };
 
-const growthFrom = (getter: (ctx: ComputeCtx, year: number) => number | null) => {
+const ebtValue = (year: number, ctx: ComputeCtx) => {
+  const ebt = ctx.valueOf(EBT_CODES, year);
+  if (ebt != null) return ebt;
+  const op = operatingIncomeValue(year, ctx);
+  if (op == null) return null;
+  const interestIncome = interestIncomeValue(year, ctx);
+  const interestExpense = interestExpenseValue(year, ctx);
+  const otherIncome = ctx.valueOf(OTHER_INCOME_CODES, year);
+  const otherExpense = ctx.valueOf(OTHER_EXPENSE_CODES, year);
+  return (
+    op +
+    (interestIncome ?? 0) -
+    (interestExpense ?? 0) +
+    (otherIncome ?? 0) -
+    (otherExpense ?? 0)
+  );
+};
+
+const netIncomeValue = (year: number, ctx: ComputeCtx) => {
+  const net = ctx.valueOf(NET_INCOME_CODES, year);
+  if (net != null) return net;
+  const ebt = ebtValue(year, ctx);
+  const taxes = ctx.valueOf(TAX_CODES, year);
+  if (ebt == null || taxes == null) return null;
+  return ebt - taxes;
+};
+
+const growthFrom = (getter: (year: number, ctx: ComputeCtx) => number | null) => {
   return (year: number, ctx: ComputeCtx) => {
     const prev = ctx.prevYear(year);
     if (!prev) return null;
-    const currVal = getter(ctx, year);
-    const prevVal = getter(ctx, prev);
+    const currVal = getter(year, ctx);
+    const prevVal = getter(prev, ctx);
     if (currVal == null || prevVal == null || prevVal === 0) return null;
     return currVal / prevVal - 1;
   };
 };
 
 const pctOf = (
-  numerator: (ctx: ComputeCtx, year: number) => number | null,
-  denominator: (ctx: ComputeCtx, year: number) => number | null
+  numerator: (year: number, ctx: ComputeCtx) => number | null,
+  denominator: (year: number, ctx: ComputeCtx) => number | null
 ) => {
   return (year: number, ctx: ComputeCtx) => {
-    const num = numerator(ctx, year);
-    const den = denominator(ctx, year);
+    const num = numerator(year, ctx);
+    const den = denominator(year, ctx);
     if (num == null || den == null || den === 0) return null;
     return num / den;
   };
 };
 
-const valueOfCode = (code: string) => (ctx: ComputeCtx, year: number) =>
-  ctx.valueOf(code, year);
-
-const buildRows = (): RowDef[] => [
+const rows: RowDef[] = [
   {
-    id: 'gross_sales',
-    label: 'Gross Sales',
-    code: 'IS_GROSS_SALES',
-    kind: 'total',
-    compute: (year, ctx) => calcGrossSales(ctx, year),
+    id: 'section_revenue',
+    label: 'Revenue & Gross Profit',
+    labelKr: '매출 및 매출총이익',
+    kind: 'section',
     children: [
       {
-        id: 'gross_sales_growth',
-        label: '% Growth',
-        kind: 'ratio',
-        format: 'percent',
-        compute: growthFrom(calcGrossSales),
-      },
-      {
-        id: 'beverages',
-        label: 'Beverages',
-        code: 'IS_BEVERAGES',
+        id: 'revenue',
+        label: 'Revenue',
+        labelKr: '매출액',
+        codes: REVENUE_CODES,
+        kind: 'total',
         children: [
           {
-            id: 'beverages_pct',
-            label: '% of Gross Sales',
+            id: 'revenue_growth',
+            label: 'YoY Growth',
+            labelKr: '전년비',
             kind: 'ratio',
             format: 'percent',
-            compute: pctOf(valueOfCode('IS_BEVERAGES'), calcGrossSales),
-          },
-          {
-            id: 'beverages_growth',
-            label: '% Growth',
-            kind: 'ratio',
-            format: 'percent',
-            compute: growthFrom(valueOfCode('IS_BEVERAGES')),
-          },
-          {
-            id: 'juices',
-            label: 'Juices/Sports Energy Drinks',
-            code: 'IS_JUICES',
-            children: [
-              {
-                id: 'juices_pct',
-                label: '% of Beverage Sales',
-                kind: 'ratio',
-                format: 'percent',
-                compute: pctOf(valueOfCode('IS_JUICES'), valueOfCode('IS_BEVERAGES')),
-              },
-              {
-                id: 'juices_growth',
-                label: '% Growth',
-                kind: 'ratio',
-                format: 'percent',
-                compute: growthFrom(valueOfCode('IS_JUICES')),
-              },
-              {
-                id: 'juices_vol',
-                label: 'Juices/Sports Energy Drinks Volumes (mLtrs)',
-                code: 'IS_JUICES_VOLUME',
-                children: [
-                  {
-                    id: 'juices_vol_growth',
-                    label: '% Growth',
-                    kind: 'ratio',
-                    format: 'percent',
-                    compute: growthFrom(valueOfCode('IS_JUICES_VOLUME')),
-                  },
-                ],
-              },
-              {
-                id: 'juices_price',
-                label: 'Price per litre ($)',
-                code: 'IS_JUICES_PRICE',
-                children: [
-                  {
-                    id: 'juices_price_growth',
-                    label: '% Growth',
-                    kind: 'ratio',
-                    format: 'percent',
-                    compute: growthFrom(valueOfCode('IS_JUICES_PRICE')),
-                  },
-                ],
-              },
-            ],
-          },
-          {
-            id: 'water',
-            label: 'Water',
-            code: 'IS_WATER',
-            children: [
-              {
-                id: 'water_pct',
-                label: '% of Beverage Sales',
-                kind: 'ratio',
-                format: 'percent',
-                compute: pctOf(valueOfCode('IS_WATER'), valueOfCode('IS_BEVERAGES')),
-              },
-              {
-                id: 'water_growth',
-                label: '% Growth',
-                kind: 'ratio',
-                format: 'percent',
-                compute: growthFrom(valueOfCode('IS_WATER')),
-              },
-              {
-                id: 'water_vol',
-                label: 'Water Volumes (mLtrs)',
-                code: 'IS_WATER_VOLUME',
-                children: [
-                  {
-                    id: 'water_vol_growth',
-                    label: '% Growth',
-                    kind: 'ratio',
-                    format: 'percent',
-                    compute: growthFrom(valueOfCode('IS_WATER_VOLUME')),
-                  },
-                ],
-              },
-              {
-                id: 'water_price',
-                label: 'Price per litre ($)',
-                code: 'IS_WATER_PRICE',
-                children: [
-                  {
-                    id: 'water_price_growth',
-                    label: '% Growth',
-                    kind: 'ratio',
-                    format: 'percent',
-                    compute: growthFrom(valueOfCode('IS_WATER_PRICE')),
-                  },
-                ],
-              },
-            ],
-          },
-          {
-            id: 'carbonates',
-            label: 'Carbonates',
-            code: 'IS_CARBONATES',
-            children: [
-              {
-                id: 'carbonates_pct',
-                label: '% of Beverage Sales',
-                kind: 'ratio',
-                format: 'percent',
-                compute: pctOf(valueOfCode('IS_CARBONATES'), valueOfCode('IS_BEVERAGES')),
-              },
-              {
-                id: 'carbonates_growth',
-                label: '% Growth',
-                kind: 'ratio',
-                format: 'percent',
-                compute: growthFrom(valueOfCode('IS_CARBONATES')),
-              },
-              {
-                id: 'carbonates_vol',
-                label: 'Carbonates Volumes (mLtrs)',
-                code: 'IS_CARBONATES_VOLUME',
-                children: [
-                  {
-                    id: 'carbonates_vol_growth',
-                    label: '% Growth',
-                    kind: 'ratio',
-                    format: 'percent',
-                    compute: growthFrom(valueOfCode('IS_CARBONATES_VOLUME')),
-                  },
-                ],
-              },
-              {
-                id: 'carbonates_price',
-                label: 'Price per litre ($)',
-                code: 'IS_CARBONATES_PRICE',
-                children: [
-                  {
-                    id: 'carbonates_price_growth',
-                    label: '% Growth',
-                    kind: 'ratio',
-                    format: 'percent',
-                    compute: growthFrom(valueOfCode('IS_CARBONATES_PRICE')),
-                  },
-                ],
-              },
-            ],
+            compute: growthFrom(revenueValue),
           },
         ],
       },
       {
-        id: 'confectionery',
-        label: 'Confectionery',
-        code: 'IS_CONFECTIONERY',
+        id: 'cogs',
+        label: 'Cost of Goods Sold',
+        labelKr: '매출원가',
+        codes: COGS_CODES,
         children: [
           {
-            id: 'confectionery_pct',
-            label: '% of Gross Sales',
+            id: 'cogs_pct',
+            label: '% of Revenue',
+            labelKr: '매출 대비',
             kind: 'ratio',
             format: 'percent',
-            compute: pctOf(valueOfCode('IS_CONFECTIONERY'), calcGrossSales),
-          },
-          {
-            id: 'confectionery_growth',
-            label: '% Growth',
-            kind: 'ratio',
-            format: 'percent',
-            compute: growthFrom(valueOfCode('IS_CONFECTIONERY')),
-          },
-          {
-            id: 'confectionery_vol',
-            label: 'Confectionery Volumes (mKgs)',
-            code: 'IS_CONFECTIONERY_VOLUME',
-            children: [
-              {
-                id: 'confectionery_vol_growth',
-                label: '% Growth',
-                kind: 'ratio',
-                format: 'percent',
-                compute: growthFrom(valueOfCode('IS_CONFECTIONERY_VOLUME')),
-              },
-            ],
-          },
-          {
-            id: 'confectionery_price',
-            label: 'Price per KG ($)',
-            code: 'IS_CONFECTIONERY_PRICE',
-            children: [
-              {
-                id: 'confectionery_price_growth',
-                label: '% Growth',
-                kind: 'ratio',
-                format: 'percent',
-                compute: growthFrom(valueOfCode('IS_CONFECTIONERY_PRICE')),
-              },
-            ],
-          },
-          {
-            id: 'confectionery_market_size',
-            label: 'Market Size',
-            code: 'IS_CONFECTIONERY_MARKET_SIZE',
-            children: [
-              {
-                id: 'confectionery_market_growth',
-                label: '% Growth',
-                kind: 'ratio',
-                format: 'percent',
-                compute: growthFrom(valueOfCode('IS_CONFECTIONERY_MARKET_SIZE')),
-              },
-            ],
-          },
-          {
-            id: 'confectionery_market_share',
-            label: 'Market Share in Confectionery Ind. (%)',
-            code: 'IS_CONFECTIONERY_MARKET_SHARE',
-            format: 'percent',
+            compute: pctOf(cogsValue, revenueValue),
           },
         ],
       },
       {
-        id: 'discounts',
-        label: 'Discounts and Rebates',
-        code: 'IS_DISCOUNTS_REBATES',
+        id: 'gross_profit',
+        label: 'Gross Profit',
+        labelKr: '매출총이익',
+        codes: GROSS_PROFIT_CODES,
+        kind: 'total',
+        compute: grossProfitValue,
         children: [
           {
-            id: 'discounts_pct',
-            label: '% of Gross Sales',
+            id: 'gross_margin',
+            label: 'Gross Margin',
+            labelKr: '매출총이익률',
             kind: 'ratio',
             format: 'percent',
-            compute: pctOf(valueOfCode('IS_DISCOUNTS_REBATES'), calcGrossSales),
+            compute: pctOf(grossProfitValue, revenueValue),
           },
         ],
       },
     ],
   },
   {
-    id: 'net_sales',
-    label: 'Net Sales',
-    code: 'IS_1000',
-    kind: 'total',
+    id: 'section_operating_expenses',
+    label: 'Operating Expenses',
+    labelKr: '영업비용',
+    kind: 'section',
     children: [
       {
-        id: 'net_sales_growth',
-        label: '% Growth',
-        kind: 'ratio',
-        format: 'percent',
-        compute: growthFrom(calcNetSales),
+        id: 'sga',
+        label: 'SG&A',
+        labelKr: '판매비와관리비',
+        codes: SGA_CODES,
+        children: [
+          {
+            id: 'sga_pct',
+            label: '% of Revenue',
+            labelKr: '매출 대비',
+            kind: 'ratio',
+            format: 'percent',
+            compute: pctOf(sgaValue, revenueValue),
+          },
+        ],
+      },
+      {
+        id: 'da',
+        label: 'Depreciation & Amortization',
+        labelKr: '감가상각비',
+        codes: DA_CODES,
+      },
+      {
+        id: 'ebitda',
+        label: 'EBITDA',
+        labelKr: 'EBITDA',
+        codes: EBITDA_CODES,
+        kind: 'total',
+        compute: ebitdaValue,
+        children: [
+          {
+            id: 'ebitda_margin',
+            label: 'EBITDA Margin',
+            labelKr: 'EBITDA 마진',
+            kind: 'ratio',
+            format: 'percent',
+            compute: pctOf(ebitdaValue, revenueValue),
+          },
+        ],
       },
     ],
   },
   {
-    id: 'cogs',
-    label: 'Cost of Goods Sold',
-    code: 'IS_1100',
+    id: 'section_operating_income',
+    label: 'Operating Income',
+    labelKr: '영업이익',
+    kind: 'section',
     children: [
       {
-        id: 'cogs_pct',
-        label: '% of Gross Sales',
-        kind: 'ratio',
-        format: 'percent',
-        compute: pctOf(valueOfCode('IS_1100'), calcGrossSales),
+        id: 'ebit',
+        label: 'EBIT (Operating Income)',
+        labelKr: '영업이익',
+        codes: EBIT_CODES,
+        kind: 'total',
+        compute: operatingIncomeValue,
+        children: [
+          {
+            id: 'ebit_margin',
+            label: 'EBIT Margin',
+            labelKr: '영업이익률',
+            kind: 'ratio',
+            format: 'percent',
+            compute: pctOf(operatingIncomeValue, revenueValue),
+          },
+        ],
       },
     ],
   },
   {
-    id: 'gross_profit',
-    label: 'Gross Profit',
-    code: 'IS_1200',
-    kind: 'total',
-    compute: (year, ctx) => calcGrossProfit(ctx, year),
+    id: 'section_non_operating',
+    label: 'Non-operating Items',
+    labelKr: '영업외손익',
+    kind: 'section',
     children: [
       {
-        id: 'gross_margin',
-        label: '% of Net Sales',
-        kind: 'ratio',
-        format: 'percent',
-        compute: pctOf(calcGrossProfit, calcNetSales),
+        id: 'interest_income',
+        label: 'Interest Income',
+        labelKr: '이자수익',
+        codes: INTEREST_INCOME_CODES,
+      },
+      {
+        id: 'interest_expense',
+        label: 'Interest Expense',
+        labelKr: '이자비용',
+        codes: INTEREST_EXPENSE_CODES,
+      },
+      {
+        id: 'other_income',
+        label: 'Other Income',
+        labelKr: '기타수익',
+        codes: OTHER_INCOME_CODES,
+      },
+      {
+        id: 'other_expense',
+        label: 'Other Expense',
+        labelKr: '기타비용',
+        codes: OTHER_EXPENSE_CODES,
       },
     ],
   },
   {
-    id: 'selling_expenses',
-    label: 'Selling Expenses',
-    code: 'IS_SELLING_EXPENSES',
+    id: 'section_pretax',
+    label: 'Pre-tax & Net Income',
+    labelKr: '세전/순이익',
+    kind: 'section',
     children: [
       {
-        id: 'selling_pct',
-        label: '% of Net Sales',
-        kind: 'ratio',
-        format: 'percent',
-        compute: pctOf(valueOfCode('IS_SELLING_EXPENSES'), calcNetSales),
+        id: 'ebt',
+        label: 'EBT',
+        labelKr: '법인세비용차감전순이익',
+        codes: EBT_CODES,
+        kind: 'total',
+        compute: ebtValue,
+        children: [
+          {
+            id: 'ebt_margin',
+            label: 'EBT Margin',
+            labelKr: '세전이익률',
+            kind: 'ratio',
+            format: 'percent',
+            compute: pctOf(ebtValue, revenueValue),
+          },
+        ],
       },
-    ],
-  },
-  {
-    id: 'ga_expenses',
-    label: 'General & Administrative Expenses',
-    code: 'IS_GA_EXPENSES',
-    children: [
       {
-        id: 'ga_pct',
-        label: '% of Net Sales',
-        kind: 'ratio',
-        format: 'percent',
-        compute: pctOf(valueOfCode('IS_GA_EXPENSES'), calcNetSales),
+        id: 'taxes',
+        label: 'Income Tax Expense',
+        labelKr: '법인세비용',
+        codes: TAX_CODES,
       },
-    ],
-  },
-  {
-    id: 'sga_total',
-    label: 'Selling, General & Admin (Total)',
-    code: 'IS_1300',
-    kind: 'total',
-    compute: (year, ctx) => calcSgaTotal(ctx, year),
-    children: [
       {
-        id: 'sga_pct',
-        label: '% of Net Sales',
-        kind: 'ratio',
-        format: 'percent',
-        compute: pctOf(calcSgaTotal, calcNetSales),
-      },
-    ],
-  },
-  {
-    id: 'ebit',
-    label: 'EBIT',
-    code: 'IS_2000',
-    kind: 'total',
-    compute: (year, ctx) => calcOperatingIncome(ctx, year),
-    children: [
-      {
-        id: 'ebit_margin',
-        label: '% margin',
-        kind: 'ratio',
-        format: 'percent',
-        compute: pctOf(calcOperatingIncome, calcNetSales),
-      },
-    ],
-  },
-  {
-    id: 'da',
-    label: 'Depreciation & Amortisation',
-    code: 'IS_DA',
-    children: [
-      {
-        id: 'da_pct',
-        label: '% of Gross Sales',
-        kind: 'ratio',
-        format: 'percent',
-        compute: pctOf(valueOfCode('IS_DA'), calcGrossSales),
-      },
-    ],
-  },
-  {
-    id: 'capex',
-    label: 'Capital Expenditure',
-    code: 'IS_CAPEX',
-    children: [
-      {
-        id: 'capex_pct',
-        label: '% of Gross Sales',
-        kind: 'ratio',
-        format: 'percent',
-        compute: pctOf(valueOfCode('IS_CAPEX'), calcGrossSales),
-      },
-    ],
-  },
-  {
-    id: 'ebitda',
-    label: 'EBITDA',
-    code: 'IS_EBITDA',
-    kind: 'total',
-    compute: (year, ctx) => calcEbitda(ctx, year),
-    children: [
-      {
-        id: 'ebitda_margin',
-        label: '% margin',
-        kind: 'ratio',
-        format: 'percent',
-        compute: pctOf(calcEbitda, calcNetSales),
-      },
-    ],
-  },
-  {
-    id: 'interest_expense',
-    label: 'Interest Expense',
-    code: 'IS_INTEREST_EXPENSE',
-  },
-  {
-    id: 'ebt',
-    label: 'EBT',
-    code: 'IS_2100',
-    kind: 'total',
-    children: [
-      {
-        id: 'ebt_margin',
-        label: '% margin',
-        kind: 'ratio',
-        format: 'percent',
-        compute: pctOf(valueOfCode('IS_2100'), calcNetSales),
-      },
-    ],
-  },
-  {
-    id: 'taxes',
-    label: 'Taxes',
-    code: 'IS_TAXES',
-  },
-  {
-    id: 'net_income',
-    label: 'Net Income',
-    code: 'IS_3000',
-    kind: 'total',
-    children: [
-      {
-        id: 'net_margin',
-        label: '% margin',
-        kind: 'ratio',
-        format: 'percent',
-        compute: pctOf(valueOfCode('IS_3000'), calcNetSales),
+        id: 'net_income',
+        label: 'Net Income',
+        labelKr: '당기순이익',
+        codes: NET_INCOME_CODES,
+        kind: 'total',
+        compute: netIncomeValue,
+        children: [
+          {
+            id: 'net_margin',
+            label: 'Net Margin',
+            labelKr: '순이익률',
+            kind: 'ratio',
+            format: 'percent',
+            compute: pctOf(netIncomeValue, revenueValue),
+          },
+        ],
       },
     ],
   },
 ];
 
-const collectCodes = (rows: RowDef[], set: Set<string>) => {
-  rows.forEach((row) => {
-    if (row.code) set.add(row.code);
-    if (row.children) collectCodes(row.children, set);
-  });
-};
+interface IncomeStatementTableProps {
+  data: Record<number, StatementYearData>;
+  years: number[];
+}
 
 export default function IncomeStatementTable({ data, years }: IncomeStatementTableProps) {
-  const [showRatios, setShowRatios] = useState(true);
-  const [showCodes, setShowCodes] = useState(false);
-  const [colWidths, setColWidths] = useState<Record<number, number>>({});
-  const [resizing, setResizing] = useState<{
-    year: number;
-    startX: number;
-    startWidth: number;
-  } | null>(null);
-
-  useEffect(() => {
-    setColWidths((prev) => {
-      const next = { ...prev };
-      years.forEach((year) => {
-        if (!next[year]) next[year] = DEFAULT_COL_WIDTH;
-      });
-      return next;
-    });
-  }, [years]);
-
-  useEffect(() => {
-    if (!resizing) return;
-    const handleMove = (e: MouseEvent) => {
-      const delta = e.clientX - resizing.startX;
-      const nextWidth = Math.max(
-        MIN_COL_WIDTH,
-        Math.min(MAX_COL_WIDTH, resizing.startWidth + delta)
-      );
-      setColWidths((prev) => ({ ...prev, [resizing.year]: nextWidth }));
-    };
-    const handleUp = () => setResizing(null);
-    window.addEventListener('mousemove', handleMove);
-    window.addEventListener('mouseup', handleUp);
-    return () => {
-      window.removeEventListener('mousemove', handleMove);
-      window.removeEventListener('mouseup', handleUp);
-    };
-  }, [resizing]);
-
-  const ctx = useMemo<ComputeCtx>(() => {
-    const yearIndex = new Map<number, number>(years.map((y, i) => [y, i]));
-    const valueOf = (code: string, year: number) =>
-      data?.[year]?.IS?.[code]?.value ?? null;
-    const prevYear = (year: number) => {
-      const idx = yearIndex.get(year);
-      if (idx == null || idx === 0) return null;
-      return years[idx - 1];
-    };
-    return { years, valueOf, prevYear };
-  }, [data, years]);
-
-  const rows = useMemo(() => buildRows(), []);
-
-  const defaultExpanded = useMemo(() => {
-    const expanded: Record<string, boolean> = {};
-    const walk = (items: RowDef[]) => {
-      items.forEach((row) => {
-        if (row.children && row.children.length > 0) {
-          expanded[row.id] = true;
-          walk(row.children);
-        }
-      });
-    };
-    walk(rows);
-    return expanded;
-  }, [rows]);
-
-  const [expanded, setExpanded] = useState<Record<string, boolean>>(defaultExpanded);
-
-  useEffect(() => {
-    setExpanded((prev) => ({ ...defaultExpanded, ...prev }));
-  }, [defaultExpanded]);
-
-  const flattenedRows = useMemo<DisplayRow[]>(() => {
-    const output: DisplayRow[] = [];
-    const walk = (items: RowDef[], level: number) => {
-      items.forEach((row) => {
-        if (!showRatios && row.kind === 'ratio') return;
-        output.push({ ...row, level });
-        if (row.children && expanded[row.id]) {
-          walk(row.children, level + 1);
-        }
-      });
-    };
-    walk(rows, 0);
-
-    const allCodes = new Set<string>();
-    collectCodes(rows, allCodes);
-
-    const unmappedCodes = new Set<string>();
-    years.forEach((year) => {
-      const statement = data?.[year]?.IS;
-      if (!statement) return;
-      Object.keys(statement).forEach((code) => {
-        if (!allCodes.has(code)) unmappedCodes.add(code);
-      });
-    });
-
-    if (unmappedCodes.size > 0) {
-      output.push({
-        id: 'unmapped_section',
-        label: 'Unmapped Accounts',
-        kind: 'section',
-        level: 0,
-      });
-      Array.from(unmappedCodes)
-        .sort()
-        .forEach((code) => {
-          output.push({
-            id: `unmapped_${code}`,
-            label: data?.[years[0]]?.IS?.[code]?.name || code,
-            code,
-            level: 1,
-          });
-        });
-    }
-
-    return output;
-  }, [rows, expanded, showRatios, data, years]);
-
-  const getRowValue = (row: RowDef, year: number) => {
-    if (row.compute) return row.compute(year, ctx);
-    if (row.code) return ctx.valueOf(row.code, year);
-    return null;
-  };
-
-  const formatValue = (row: RowDef, value: number | null) => {
-    if (value == null || Number.isNaN(value)) return '-';
-    if (row.format === 'percent') {
-      return `${percentFormatter.format(value * 100)}%`;
-    }
-    const abs = Math.abs(value);
-    const formatted = numberFormatter.format(abs);
-    return value < 0 ? `(${formatted})` : formatted;
-  };
-
-  const cellPadding = 'py-0.5';
-  const textSize = 'text-[10px]';
-
   return (
-    <div className="w-full">
-      <div className="border-b border-red-700 bg-red-600 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-white">
-        Income Statement
-      </div>
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b px-3 py-2">
-        <div className="text-[11px] text-gray-500">YE 31-Dec • USDm</div>
-        <div className="flex items-center gap-3 text-xs text-gray-600">
-          <label className="inline-flex items-center gap-1">
-            <input
-              type="checkbox"
-              checked={showRatios}
-              onChange={(e) => setShowRatios(e.target.checked)}
-            />
-            Ratios
-          </label>
-          <label className="inline-flex items-center gap-1">
-            <input
-              type="checkbox"
-              checked={showCodes}
-              onChange={(e) => setShowCodes(e.target.checked)}
-            />
-            Codes
-          </label>
-        </div>
-      </div>
-
-      <div className="overflow-auto">
-        <table className={cn('min-w-full border-collapse', textSize)} style={{ tableLayout: 'fixed' }}>
-          <thead className="sticky top-0 z-20 bg-slate-50">
-            <tr>
-              <th
-                className={cn(
-                  'sticky left-0 z-30 border-b border-r bg-slate-50 px-2 py-1 text-left font-semibold text-gray-600'
-                )}
-                style={{ width: 230 }}
-              >
-                Account
-              </th>
-              {years.map((year) => (
-                <th
-                  key={year}
-                  className="relative border-b border-r bg-slate-50 px-1 py-1 text-right font-semibold text-gray-600"
-                  style={{ width: colWidths[year] || DEFAULT_COL_WIDTH }}
-                >
-                  {year}
-                  <span
-                    className="absolute right-0 top-0 h-full w-1 cursor-col-resize"
-                    onMouseDown={(e) =>
-                      setResizing({
-                        year,
-                        startX: e.clientX,
-                        startWidth: colWidths[year] || DEFAULT_COL_WIDTH,
-                      })
-                    }
-                  />
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {flattenedRows.map((row) => {
-              const hasChildren = !!row.children && row.children.length > 0;
-              const rowClasses =
-                row.kind === 'section'
-                  ? 'bg-gray-50 font-semibold text-gray-700'
-                  : row.kind === 'total'
-                    ? 'bg-gray-50/60 font-semibold text-gray-700'
-                    : row.kind === 'ratio'
-                      ? 'bg-amber-50/60 text-gray-600'
-                      : 'text-gray-700';
-              const leftCellBg =
-                row.kind === 'section'
-                  ? 'bg-gray-50'
-                  : row.kind === 'total'
-                    ? 'bg-gray-50/60'
-                    : row.kind === 'ratio'
-                      ? 'bg-amber-50/60'
-                      : 'bg-white';
-              return (
-                <tr key={row.id} className={cn('border-b', rowClasses)}>
-                  <td
-                    className={cn(
-                      'sticky left-0 z-10 border-r px-2',
-                      leftCellBg,
-                      cellPadding
-                    )}
-                    style={{ paddingLeft: 10 + row.level * 12 }}
-                  >
-                    <div className="flex items-center gap-2">
-                      {hasChildren && (
-                        <button
-                          className="h-4 w-4 rounded border text-[10px] leading-none text-gray-500"
-                          onClick={() =>
-                            setExpanded((prev) => ({ ...prev, [row.id]: !prev[row.id] }))
-                          }
-                        >
-                          {expanded[row.id] ? '−' : '+'}
-                        </button>
-                      )}
-                      <span className={cn(row.kind === 'section' && 'uppercase tracking-wide')}>
-                        {row.label}
-                      </span>
-                      {showCodes && row.code && (
-                        <span className="text-[9px] text-gray-400">{row.code}</span>
-                      )}
-                    </div>
-                  </td>
-                  {years.map((year) => {
-                    const value = getRowValue(row, year);
-                    return (
-                      <td
-                        key={year}
-                        className={cn(
-                          'border-r px-1 text-right font-mono text-[10px] tabular-nums text-gray-800',
-                          cellPadding
-                        )}
-                      >
-                        {formatValue(row, value)}
-                      </td>
-                    );
-                  })}
-                </tr>
-              );
-            })}
-            {flattenedRows.length === 0 && (
-              <tr>
-                <td colSpan={years.length + 1} className="px-6 py-12 text-center text-gray-500">
-                  No data available for this view.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-    </div>
+    <StatementTable
+      title="Income Statement"
+      statementType="IS"
+      data={data}
+      years={years}
+      rows={rows}
+      defaultShowRatios
+    />
   );
 }

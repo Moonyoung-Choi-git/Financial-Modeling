@@ -6,6 +6,7 @@ import { fetchCorpCodeFile } from './opendart';
 interface CorpCodeXmlItem {
   corp_code: string[];
   corp_name: string[];
+  corp_eng_name?: string[];
   stock_code: string[];
   modify_date: string[];
 }
@@ -42,9 +43,11 @@ export async function syncCorpCodes() {
   // 4. 데이터 변환
   const corpCodes = list.map((item) => {
     const stockCode = item.stock_code[0].trim();
+    const corpEngName = item.corp_eng_name?.[0]?.trim();
     return {
-      code: item.corp_code[0],
-      name: item.corp_name[0],
+      corpCode: item.corp_code[0],
+      corpName: item.corp_name[0],
+      corpEngName: corpEngName || null,
       stockCode: stockCode === '' ? null : stockCode, // 비상장 기업은 null 처리
       modifyDate: item.modify_date[0],
     };
@@ -53,8 +56,8 @@ export async function syncCorpCodes() {
   // 5. DB 저장 (Transaction: Delete -> CreateMany)
   // 데이터 양이 많으므로(약 10만 건) createMany를 사용합니다.
   await prisma.$transaction([
-    prisma.corpCode.deleteMany(), // 기존 데이터 삭제 (Full Refresh)
-    prisma.corpCode.createMany({
+    prisma.rawDartCorpMaster.deleteMany(), // 기존 데이터 삭제 (Full Refresh)
+    prisma.rawDartCorpMaster.createMany({
       data: corpCodes,
       skipDuplicates: true, // 혹시 모를 중복 방지
     }),

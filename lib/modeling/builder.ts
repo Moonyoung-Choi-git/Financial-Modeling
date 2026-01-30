@@ -15,11 +15,16 @@ export async function buildThreeStatementModel(options: BuildOptions) {
   const fsDivPriority = options.fsDivPriority || ['CFS', 'OFS'];
 
   // 1. 해당 기간의 모든 정제된 계정 데이터 조회
-  const rawAccounts = await prisma.financialAccount.findMany({
+  const rawAccounts = await prisma.curatedFinFact.findMany({
     where: {
-      ticker,
+      stockCode: ticker,
       fiscalYear: { in: years },
     },
+    orderBy: [
+      { fiscalYear: 'asc' },
+      { statementType: 'asc' },
+      { ordering: 'asc' },
+    ],
   });
 
   const modelData: Record<string, any> = {};
@@ -30,22 +35,28 @@ export async function buildThreeStatementModel(options: BuildOptions) {
     
     if (accountsByYear.length === 0) continue;
 
-    // 2-1. FS Div (연결/개별) 선택 로직
-    let selectedFsDiv = null;
+    // 2-1. FS Scope (연결/개별) 선택 로직
+    // fsScope: CONSOLIDATED (CFS) or SEPARATE (OFS)
+    let selectedFsScope = null;
     let targetAccounts: typeof rawAccounts = [];
 
     for (const div of fsDivPriority) {
-      // @ts-ignore: 스키마 업데이트가 반영되었다고 가정 (fsDiv 필드)
-      const filtered = accountsByYear.filter((a) => a.fsDiv === div);
+      const scopeMapping: Record<string, string> = {
+        'CFS': 'CONSOLIDATED',
+        'OFS': 'SEPARATE'
+      };
+      const scope = scopeMapping[div];
+
+      const filtered = accountsByYear.filter((a) => a.fsScope === scope);
       if (filtered.length > 0) {
-        selectedFsDiv = div;
+        selectedFsScope = div; // Keep CFS/OFS for display
         targetAccounts = filtered;
         break; // 우선순위 높은 것이 발견되면 중단
       }
     }
 
     // 해당 연도에 적합한 데이터가 없으면 스킵
-    if (!selectedFsDiv || targetAccounts.length === 0) continue;
+    if (!selectedFsScope || targetAccounts.length === 0) continue;
 
     // 2-2. Statement Type 처리 (CIS가 있으면 IS 대신 사용)
     const hasCIS = targetAccounts.some((a) => a.statementType === 'CIS');
@@ -55,13 +66,14 @@ export async function buildThreeStatementModel(options: BuildOptions) {
       return targetAccounts
         .filter((a) => a.statementType === type)
         .reduce((acc: any, curr) => {
-          // 표준 코드가 있으면 사용, 없으면 리포트된 이름 사용
-          const key = curr.standardAccountCode || curr.reportedAccountName;
+          // 표준 코드가 있으면 사용, 없으면 한글 계정명 사용
+          const key = curr.standardLineId || curr.accountNameKr;
           acc[key] = {
-            name: curr.standardAccountName || curr.reportedAccountName,
-            value: Number(curr.value), // Decimal -> Number 변환
-            reportedName: curr.reportedAccountName,
-            unit: curr.unit
+            name: curr.accountNameKr,
+            value: Number(curr.amount), // Decimal -> Number 변환
+            reportedName: curr.accountNameKr,
+            standardLineId: curr.standardLineId,
+            unit: curr.currency || 'KRW'
           };
           return acc;
         }, {});
@@ -70,7 +82,7 @@ export async function buildThreeStatementModel(options: BuildOptions) {
     // 2-4. 최종 데이터 구조화
     modelData[year] = {
       meta: {
-        fsDiv: selectedFsDiv,
+        fsDiv: selectedFsScope,
         year: year,
         source: 'DART_OPEN_API',
       },

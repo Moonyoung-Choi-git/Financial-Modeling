@@ -16,9 +16,9 @@ async function triggerAutoIngestion(ticker: string, years: number[]) {
   console.log(`[Auto-Ingest] Starting ingestion for ${ticker} (${years.join(', ')})`);
 
   // 1) CorpCode가 없으면 동기화 (최초 1회)
-  const corpExists = await prisma.corpCode.findFirst({
+  const corpExists = await prisma.rawDartCorpMaster.findFirst({
     where: { stockCode: ticker },
-    select: { code: true },
+    select: { corpCode: true },
   });
   if (!corpExists) {
     console.log(`[Auto-Ingest] CorpCode missing for ${ticker}. Syncing corp codes...`);
@@ -32,8 +32,8 @@ async function triggerAutoIngestion(ticker: string, years: number[]) {
   let didIngest = false;
 
   for (const year of years) {
-    const alreadyHasData = await prisma.financialAccount.findFirst({
-      where: { ticker, fiscalYear: year },
+    const alreadyHasData = await prisma.curatedFinFact.findFirst({
+      where: { stockCode: ticker, fiscalYear: year },
       select: { id: true },
     });
     if (alreadyHasData) continue;
@@ -68,17 +68,29 @@ async function triggerAutoIngestion(ticker: string, years: number[]) {
 
 export default async function FinancialsPage({ params }: PageProps) {
   const { ticker } = await params;
-  
+
+  // Defensive check: Ensure Prisma is initialized
+  if (!prisma) {
+    return (
+      <div className="container mx-auto py-8 px-4">
+        <div className="p-4 bg-red-50 text-red-600 rounded-md">
+          <h2 className="font-bold mb-2">Database Connection Error</h2>
+          <p>Prisma client is not initialized. Please check your DATABASE_URL environment variable and restart the development server.</p>
+        </div>
+      </div>
+    );
+  }
+
   // 기준 연도: DB에 데이터가 있으면 가장 최신 연도, 없으면 직전 연도
   // (실제 운영 시에는 DB 캐시를 먼저 조회하고 없으면 생성하는 로직 권장)
   const currentYear = new Date().getFullYear();
-  const latestYear = await prisma.financialAccount.aggregate({
-    where: { ticker },
+  const latestYear = await prisma.curatedFinFact.aggregate({
+    where: { stockCode: ticker },
     _max: { fiscalYear: true },
   });
   const anchorYear = latestYear._max.fiscalYear ?? currentYear - 1;
   const years = Array.from({ length: 5 }, (_, i) => anchorYear - 4 + i);
-  
+
   let modelData = {};
   let error = null;
 
@@ -94,7 +106,14 @@ export default async function FinancialsPage({ params }: PageProps) {
   }
 
   const isEmptyModel = Object.keys(modelData).length === 0;
-  if (isEmptyModel) {
+
+  // [TEMPORARILY DISABLED] Auto-ingestion disabled due to schema mismatch
+  // The ingestion layer (lib/ingestion.ts, lib/refinement.ts) uses Prisma models
+  // that don't exist in the current schema. See docs/CRITICAL_SCHEMA_MISMATCH.md
+  // TODO: Re-enable after refactoring ingestion/refinement to use current schema
+  const AUTO_INGESTION_ENABLED = false;
+
+  if (isEmptyModel && AUTO_INGESTION_ENABLED) {
     try {
       const ingested = await triggerAutoIngestion(ticker, years);
       if (ingested) {
@@ -111,6 +130,11 @@ export default async function FinancialsPage({ params }: PageProps) {
       console.error('Auto-ingestion and retry failed:', retryError);
       if (!error) error = retryError?.message || 'Auto-ingestion failed';
     }
+  }
+
+  // If no data and auto-ingestion is disabled, show helpful error
+  if (isEmptyModel && !error) {
+    error = `No financial data found for ticker ${ticker}. Auto-ingestion is currently disabled due to schema migration. Please load data manually or see docs/CRITICAL_SCHEMA_MISMATCH.md for details.`;
   }
   // 실제 데이터가 있는 연도를 기준으로 5개 연도 범위 표시
   const availableYears = Object.keys(modelData)

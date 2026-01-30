@@ -138,7 +138,7 @@ export async function createFinancialStatementTask(
   fsDiv: 'CFS' | 'OFS' = 'CFS' // CFS: 연결, OFS: 개별
 ) {
   // 1. CorpCode 조회
-  const corpInfo = await prisma.corpCode.findFirst({
+  const corpInfo = await prisma.rawDartCorpMaster.findFirst({
     where: { stockCode: ticker },
   });
 
@@ -149,14 +149,14 @@ export async function createFinancialStatementTask(
   // 2. 파라미터 구성
   // DART API 파라미터(corp_code 등)와 내부 메타데이터용 파라미터(ticker 등)를 함께 구성
   const params = {
-    corp_code: corpInfo.code,
+    corp_code: corpInfo.corpCode,
     bsns_year: year.toString(),
     reprt_code: reportCode,
     fs_div: fsDiv, // 연결재무제표(CFS) 우선, 필요 시 개별(OFS)
-    
+
     // 내부 메타데이터용 (processIngestionTask에서 사용)
     ticker: ticker,
-    corpName: corpInfo.name,
+    corpName: corpInfo.corpName,
     year: year.toString(),
     reportCode: reportCode
   };
