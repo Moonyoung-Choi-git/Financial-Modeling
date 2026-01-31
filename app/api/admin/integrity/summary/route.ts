@@ -64,6 +64,7 @@ export async function GET(request: Request) {
       prisma.rawDartApiCall.groupBy({
         by: ["dartStatus"],
         where: whereApiByRequest,
+        orderBy: { dartStatus: "asc" },
         _count: { _all: true },
       }),
       prisma.rawDartApiCall.count({
