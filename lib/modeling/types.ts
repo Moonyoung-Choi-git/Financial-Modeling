@@ -1,11 +1,11 @@
-import { Decimal } from "@/lib/math";
+import { Decimal, DecimalValue } from "@/lib/math";
 
 export type WaccInputs = {
-  equity: Decimal.Value;
-  debt: Decimal.Value;
-  costOfEquity: Decimal.Value;
-  costOfDebt: Decimal.Value;
-  taxRate: Decimal.Value;
+  equity: DecimalValue;
+  debt: DecimalValue;
+  costOfEquity: DecimalValue;
+  costOfDebt: DecimalValue;
+  taxRate: DecimalValue;
 };
 
 export type WaccResult = {
@@ -20,13 +20,13 @@ export type WaccResult = {
 };
 
 export type DcfInputs = {
-  fcf: Decimal.Value[];
-  wacc: Decimal.Value;
-  terminalGrowth?: Decimal.Value;
-  terminalMultiple?: Decimal.Value;
-  netDebt?: Decimal.Value;
-  cash?: Decimal.Value;
-  sharesOutstanding?: Decimal.Value;
+  fcf: DecimalValue[];
+  wacc: DecimalValue;
+  terminalGrowth?: DecimalValue;
+  terminalMultiple?: DecimalValue;
+  netDebt?: DecimalValue;
+  cash?: DecimalValue;
+  sharesOutstanding?: DecimalValue;
 };
 
 export type DcfResult = {

@@ -107,11 +107,8 @@ export async function fetchFinancialKey(params: DartFnlttKeyParams): Promise<{
         frmtrmAmount: item.frmtrm_amount,
         bfefrmtrmNm: item.bfefrmtrm_nm,
         bfefrmtrmAmount: item.bfefrmtrm_amount,
+        ...(safeRceptNo && { rceptNo: safeRceptNo }),
       };
-
-      if (safeRceptNo) {
-        updateData.rceptNo = safeRceptNo;
-      }
 
       await prisma.rawDartFnlttKeyRow.upsert({
         where: {
@@ -217,11 +214,8 @@ export async function fetchFinancialAll(params: DartFnlttAllParams): Promise<{
           bfefrmtrmNm: item.bfefrmtrm_nm,
           bfefrmtrmAmount: item.bfefrmtrm_amount,
           currency: item.currency,
+          ...(safeRceptNo && { rceptNo: safeRceptNo }),
         };
-
-        if (safeRceptNo) {
-          updateData.rceptNo = safeRceptNo;
-        }
 
         await prisma.rawDartFnlttAllRow.upsert({
           where: {

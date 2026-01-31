@@ -8,7 +8,7 @@ import { exportToXlsx } from '@/lib/viewer';
 import prisma from '@/lib/db';
 
 export async function GET(
-  request: NextRequest,
+  _request: NextRequest,
   context: { params: Promise<{ snapshotId: string }> }
 ) {
   try {
@@ -48,7 +48,10 @@ export async function GET(
     }
 
     // Return file
-    return new NextResponse(result.buffer, {
+    // Convert Buffer to Uint8Array for NextResponse
+    const uint8Array = new Uint8Array(result.buffer);
+
+    return new NextResponse(uint8Array, {
       headers: {
         'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         'Content-Disposition': `attachment; filename="${result.fileName}"`,

@@ -165,8 +165,11 @@ async function main() {
     // Test 5: Restatement Detection
     console.log('[5/5] Testing Restatement Detection...\n');
 
+    const sinceDate = new Date();
+    sinceDate.setDate(sinceDate.getDate() - 90);
+
     const restatements = await detectRestatements({
-      sinceDays: 90,
+      sinceDate,
     });
 
     console.log('🔍 Restatement Detection:');

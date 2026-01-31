@@ -414,21 +414,27 @@ export async function assessRestatementImpact(event: RestatementEvent): Promise<
     },
     select: {
       id: true,
-      project: {
+      entity: {
         select: {
-          id: true,
-          createdBy: true,
+          project: {
+            select: {
+              id: true,
+              createdBy: true,
+            },
+          },
         },
       },
     },
   });
 
   const snapshotsAffected = snapshots.map((s) => s.id);
-  const modelsToRebuild = snapshots.map((s) => s.project.id);
+  const modelsToRebuild = snapshots
+    .filter((s) => s.entity.project !== null)
+    .map((s) => s.entity.project!.id);
   const notificationsRequired = snapshots
-    .filter((s) => s.project.createdBy !== null)
+    .filter((s) => s.entity.project?.createdBy !== null)
     .map((s) => ({
-      userId: s.project.createdBy!,
+      userId: s.entity.project!.createdBy!,
       reason: `Restatement detected for ${event.corpCode} FY${event.fiscalYear}. Impact score: ${event.impactScore}`,
     }));
 
