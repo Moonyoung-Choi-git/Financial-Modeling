@@ -91,7 +91,9 @@ export async function GET(request: Request) {
     const statusCounts = statusGroups.reduce<Record<string, number>>(
       (acc, row) => {
         const key = row.dartStatus ?? "UNKNOWN";
-        acc[key] = row._count?._all ?? 0;
+        const count =
+          typeof row._count === "object" && row._count ? row._count._all ?? 0 : 0;
+        acc[key] = count;
         return acc;
       },
       {}
